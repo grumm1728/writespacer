@@ -100,6 +100,11 @@ export async function processWorksheetFile(file: File): Promise<WorksheetResult>
     width,
     height,
   );
+  if (problemRegions.length === 0) {
+    throw new Error(
+      "No problem regions were detected. Try the debug overlay to inspect anchors, or use a tighter crop of the worksheet page.",
+    );
+  }
   const crops = await buildCropAssets(canvas, problemRegions);
   const pdf = await buildWorksheetPdf(crops);
 
@@ -407,8 +412,12 @@ function detectAnchorCandidates(
     primaryAnchors.length >= 4
       ? primaryAnchors
       : synthesizeFallbackAnchors(rows, rowSegments, contentBounds, primaryAnchors);
+  const withRowStarts =
+    relaxedAnchors.length >= 4
+      ? relaxedAnchors
+      : synthesizeRowStartAnchors(rows, rowSegments, contentBounds, relaxedAnchors);
 
-  return dedupeAnchors(relaxedAnchors)
+  return dedupeAnchors(withRowStarts)
     .sort(compareReadingOrder)
     .map((anchor, index) => ({ ...anchor, inferredNumber: index + 1 }));
 }
@@ -465,6 +474,76 @@ function synthesizeFallbackAnchors(
       (second ? 0.16 : 0.1) +
       (gapToSecond > Math.max(4, row.rect.height * 0.08) ? 0.12 : 0.05) +
       (row.rect.width > first.rect.width * 2 ? 0.12 : 0.06);
+
+    anchors.push({
+      id: `anchor-${anchors.length + 1}`,
+      rect: first.rect,
+      row,
+      score,
+      inferredNumber: anchors.length + 1,
+    });
+  }
+
+  return anchors;
+}
+
+function synthesizeRowStartAnchors(
+  rows: TextRow[],
+  rowSegments: RowSegment[],
+  contentBounds: Rect,
+  existingAnchors: AnchorCandidate[],
+) {
+  const anchors = [...existingAnchors];
+  const leftMargin = contentBounds.left + Math.min(120, contentBounds.width * 0.12);
+  const sortedRows = [...rows].sort((left, right) => left.rect.top - right.rect.top);
+
+  for (const row of sortedRows) {
+    const rowHasAnchor = anchors.some((anchor) =>
+      intersects(
+        padRect(anchor.row.rect, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, 4),
+        row.rect,
+      ),
+    );
+    if (rowHasAnchor) {
+      continue;
+    }
+
+    const segments = rowSegments
+      .filter((segment) => segment.rowId === row.id)
+      .sort((left, right) => left.rect.left - right.rect.left);
+    if (segments.length === 0) {
+      continue;
+    }
+
+    const first = segments[0];
+    const second = segments[1] ?? null;
+    const rowLooksLikeHeader =
+      row.rect.width > contentBounds.width * 0.34 &&
+      row.rect.height > 18 &&
+      first.rect.left < leftMargin;
+
+    if (rowLooksLikeHeader) {
+      continue;
+    }
+
+    const startsNearMargin = first.rect.left <= leftMargin;
+    const substantialRow = row.rect.width > Math.max(120, contentBounds.width * 0.16);
+    const hasSeparatedContent =
+      second !== null &&
+      second.rect.left - (first.rect.left + first.rect.width) >
+        Math.max(4, row.rect.height * 0.08);
+    const firstIsCompact =
+      first.rect.width < Math.min(120, Math.max(36, row.rect.width * 0.24));
+
+    if (!startsNearMargin || !substantialRow || (!firstIsCompact && !hasSeparatedContent)) {
+      continue;
+    }
+
+    const score =
+      0.36 +
+      (firstIsCompact ? 0.16 : 0.08) +
+      (hasSeparatedContent ? 0.16 : 0.06) +
+      (row.rect.width > first.rect.width * 2.2 ? 0.12 : 0.04);
 
     anchors.push({
       id: `anchor-${anchors.length + 1}`,
