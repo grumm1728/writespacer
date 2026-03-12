@@ -1,13 +1,14 @@
 "use client";
 
-import { useEffect, useRef, useState, useTransition } from "react";
+import { useEffect, useState } from "react";
 
-import type { JobRecord, JobStatus } from "@/lib/types";
+import { processWorksheetFile, revokeWorksheetResult } from "@/lib/client-processing";
+import type { WorksheetResult, WorksheetStatus } from "@/lib/types";
 
 const ACCEPT = "image/png,image/jpeg,image/webp";
 
-const statusCopy: Record<JobStatus, string> = {
-  queued: "Waiting to process",
+const statusCopy: Record<WorksheetStatus, string> = {
+  idle: "Ready",
   processing: "Detecting prompts and building PDF",
   complete: "Worksheet ready",
   failed: "Processing failed",
@@ -15,42 +16,17 @@ const statusCopy: Record<JobStatus, string> = {
 
 export function WorksheetApp() {
   const [file, setFile] = useState<File | null>(null);
-  const [job, setJob] = useState<JobRecord | null>(null);
+  const [result, setResult] = useState<WorksheetResult | null>(null);
+  const [status, setStatus] = useState<WorksheetStatus>("idle");
   const [error, setError] = useState<string | null>(null);
-  const [isPending, startTransition] = useTransition();
-  const pollerRef = useRef<number | null>(null);
 
   useEffect(() => {
     return () => {
-      if (pollerRef.current) {
-        window.clearTimeout(pollerRef.current);
+      if (result) {
+        revokeWorksheetResult(result);
       }
     };
-  }, []);
-
-  useEffect(() => {
-    if (!job || job.status === "complete" || job.status === "failed") {
-      return;
-    }
-
-    pollerRef.current = window.setTimeout(async () => {
-      const response = await fetch(`/api/jobs/${job.id}`, { cache: "no-store" });
-
-      if (!response.ok) {
-        setError("The job status could not be refreshed.");
-        return;
-      }
-
-      const nextJob = (await response.json()) as JobRecord;
-      setJob(nextJob);
-    }, 1200);
-
-    return () => {
-      if (pollerRef.current) {
-        window.clearTimeout(pollerRef.current);
-      }
-    };
-  }, [job]);
+  }, [result]);
 
   async function handleSubmit() {
     if (!file) {
@@ -58,39 +34,41 @@ export function WorksheetApp() {
       return;
     }
 
+    if (result) {
+      revokeWorksheetResult(result);
+      setResult(null);
+    }
+
+    setStatus("processing");
     setError(null);
-    setJob(null);
 
-    startTransition(async () => {
-      const formData = new FormData();
-      formData.append("file", file);
-
-      const response = await fetch("/api/jobs", {
-        method: "POST",
-        body: formData,
-      });
-
-      if (!response.ok) {
-        const payload = (await response.json().catch(() => null)) as
-          | { error?: string }
-          | null;
-        setError(payload?.error ?? "The upload could not be processed.");
-        return;
-      }
-
-      const createdJob = (await response.json()) as JobRecord;
-      setJob(createdJob);
-    });
+    try {
+      const nextResult = await processWorksheetFile(file);
+      setResult(nextResult);
+      setStatus("complete");
+    } catch (processingError) {
+      setStatus("failed");
+      setError(
+        processingError instanceof Error
+          ? processingError.message
+          : "The worksheet could not be generated.",
+      );
+    }
   }
 
   function resetFlow() {
+    if (result) {
+      revokeWorksheetResult(result);
+    }
+
     setFile(null);
-    setJob(null);
+    setResult(null);
     setError(null);
+    setStatus("idle");
   }
 
-  const confidencePct = job?.confidenceSummary
-    ? Math.round(job.confidenceSummary.averageConfidence * 100)
+  const confidencePct = result
+    ? Math.round(result.confidenceSummary.averageConfidence * 100)
     : null;
 
   return (
@@ -102,15 +80,16 @@ export function WorksheetApp() {
             <h1 className="hero-title">Give students room to show the work.</h1>
             <p className="hero-copy">
               Upload a screenshot or photo of a dense math page. WriteSpacer
-              automatically isolates each prompt, keeps diagrams attached, and
-              lays everything out on a printable PDF with generous answer space.
+              isolates each prompt, keeps diagrams attached, and lays everything
+              out on a printable PDF with generous answer space, directly in the
+              browser.
             </p>
             <div className="hero-notes">
               <div className="hero-note">
-                <strong>Built for classroom handouts</strong>
+                <strong>GitHub Pages friendly</strong>
                 <span>
-                  Keeps the original math notation as image crops so radicals,
-                  fractions, graphs, and geometry figures stay intact.
+                  All image analysis and PDF generation run client-side, so the
+                  app can deploy as a static site with no backend server.
                 </span>
               </div>
               <div className="hero-note">
@@ -148,24 +127,18 @@ export function WorksheetApp() {
           <div>
             <h2>Upload a single page and export a PDF</h2>
             <p>
-              V1 accepts one image at a time and uses a server-side segmentation
-              pass. The output is tuned for US Letter printing and anonymous
-              use, with no review step required.
+              V1 now runs entirely in the browser so it can deploy to GitHub
+              Pages. Your upload never leaves the tab. The output is tuned for
+              US Letter printing and one-page source images.
             </p>
           </div>
-          {job ? (
-            <span
-              className={`status-pill ${
-                job.status === "complete"
-                  ? "complete"
-                  : job.status === "failed"
-                    ? "failed"
-                    : ""
-              }`}
-            >
-              {statusCopy[job.status]}
-            </span>
-          ) : null}
+          <span
+            className={`status-pill ${
+              status === "complete" ? "complete" : status === "failed" ? "failed" : ""
+            }`}
+          >
+            {statusCopy[status]}
+          </span>
         </div>
 
         <div className="steps">
@@ -173,16 +146,16 @@ export function WorksheetApp() {
             <strong>1</strong>
             <h3>Normalize the page</h3>
             <p>
-              The server rotates, resizes, and cleans contrast so dense text and
-              math clusters are easier to separate.
+              The browser scales the page, samples grayscale values, and trims
+              the active content area before segmentation.
             </p>
           </div>
           <div className="step-card">
             <strong>2</strong>
             <h3>Detect problem regions</h3>
             <p>
-              Heuristics group text lines into prompt blocks and attach nearby
-              orphan diagrams to the closest matching problem.
+              Heuristics group dense line bands into prompt blocks and attach
+              likely diagrams to the closest matching problem.
             </p>
           </div>
           <div className="step-card">
@@ -190,7 +163,7 @@ export function WorksheetApp() {
             <h3>Lay out worksheet pages</h3>
             <p>
               Prompt crops are placed beside or above answer space and exported
-              as a print-ready PDF.
+              as a PDF that downloads directly to the device.
             </p>
           </div>
         </div>
@@ -216,7 +189,7 @@ export function WorksheetApp() {
               </p>
               {file ? (
                 <span className="file-pill">
-                  {file.name} · {(file.size / 1024 / 1024).toFixed(2)} MB
+                  {file.name} | {(file.size / 1024 / 1024).toFixed(2)} MB
                 </span>
               ) : (
                 <span className="helper-text">
@@ -227,15 +200,15 @@ export function WorksheetApp() {
               <div className="controls">
                 <button
                   className="button"
-                  disabled={!file || isPending}
+                  disabled={!file || status === "processing"}
                   onClick={handleSubmit}
                   type="button"
                 >
-                  {isPending ? "Uploading..." : "Generate worksheet PDF"}
+                  {status === "processing" ? "Generating..." : "Generate worksheet PDF"}
                 </button>
                 <button
                   className="button-secondary"
-                  disabled={isPending && !job}
+                  disabled={status === "processing" && !result}
                   onClick={resetFlow}
                   type="button"
                 >
@@ -248,43 +221,43 @@ export function WorksheetApp() {
 
           <aside className="status-card">
             <div>
-              <h3>What the system returns</h3>
+              <h3>Static deployment shape</h3>
               <p className="meta-text">
-                Each job exposes a typed status endpoint, a PDF download route,
-                and summary metadata about detection confidence and page count.
+                The GitHub Pages build exports plain HTML, CSS, and JavaScript.
+                No API routes or upload server are required.
               </p>
             </div>
             <div className="status-grid">
               <div className="item-card">
-                <h4>POST /api/jobs</h4>
-                <p>Accepts the upload and returns a queued job record.</p>
+                <h4>Client-side processing</h4>
+                <p>The browser analyzes the image and builds the worksheet locally.</p>
               </div>
               <div className="item-card">
-                <h4>GET /api/jobs/:jobId</h4>
-                <p>Polls job state and triggers server-side processing on demand.</p>
+                <h4>Download-only output</h4>
+                <p>The finished PDF is held as an in-memory blob and downloaded directly.</p>
               </div>
               <div className="item-card">
-                <h4>GET /api/jobs/:jobId/pdf</h4>
-                <p>Returns the finished PDF when generation completes.</p>
+                <h4>Repo-site safe</h4>
+                <p>The app is configured to run under the `/writespacer` GitHub Pages path.</p>
               </div>
             </div>
           </aside>
         </div>
 
-        {job ? (
+        {result ? (
           <>
             <div className="results-grid">
               <div className="stat-card">
                 <h3>Status</h3>
-                <strong>{statusCopy[job.status]}</strong>
+                <strong>{statusCopy[status]}</strong>
               </div>
               <div className="stat-card">
                 <h3>Detected prompts</h3>
-                <strong>{job.itemCount}</strong>
+                <strong>{result.itemCount}</strong>
               </div>
               <div className="stat-card">
                 <h3>PDF pages</h3>
-                <strong>{job.pageCount}</strong>
+                <strong>{result.pageCount}</strong>
               </div>
             </div>
 
@@ -293,16 +266,15 @@ export function WorksheetApp() {
                 <h4>Detection confidence</h4>
                 <p>
                   {confidencePct !== null
-                    ? `${confidencePct}% average confidence with ${job.confidenceSummary.lowConfidenceCount} low-confidence regions.`
+                    ? `${confidencePct}% average confidence with ${result.confidenceSummary.lowConfidenceCount} low-confidence regions.`
                     : "Confidence is calculated when processing finishes."}
                 </p>
               </div>
               <div className="item-card">
                 <h4>Source image</h4>
                 <p>
-                  {job.sourceImage
-                    ? `${job.sourceImage.width} × ${job.sourceImage.height} ${job.sourceImage.mimeType}`
-                    : "Waiting for image metadata."}
+                  {result.sourceImage.width} x {result.sourceImage.height}{" "}
+                  {result.sourceImage.mimeType}
                 </p>
               </div>
               <div className="item-card">
@@ -315,15 +287,9 @@ export function WorksheetApp() {
               <div className="item-card">
                 <h4>Download</h4>
                 <p>
-                  {job.status === "complete" ? (
-                    <a className="button" href={`/api/jobs/${job.id}/pdf`}>
-                      Download PDF
-                    </a>
-                  ) : job.status === "failed" ? (
-                    job.error ?? "Processing failed."
-                  ) : (
-                    "The PDF link will appear automatically when generation finishes."
-                  )}
+                  <a className="button" download="worksheet.pdf" href={result.pdfUrl}>
+                    Download PDF
+                  </a>
                 </p>
               </div>
             </div>
@@ -332,9 +298,9 @@ export function WorksheetApp() {
       </section>
 
       <p className="footer-note">
-        This first version is tuned for one-page math handouts. The data model
-        and job API are structured so manual review, OCR, and multi-page input
-        can be added later without breaking the core flow.
+        This version is optimized for GitHub Pages deployment and one-page math
+        handouts. Manual review, OCR, and multi-page support can still be added
+        later if we move back to a richer runtime.
       </p>
     </main>
   );

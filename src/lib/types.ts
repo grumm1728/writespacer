@@ -1,6 +1,6 @@
-export type JobStatus = "queued" | "processing" | "complete" | "failed";
-
 export type LayoutMode = "side" | "below";
+
+export type WorksheetStatus = "idle" | "processing" | "complete" | "failed";
 
 export type Rect = {
   left: number;
@@ -14,7 +14,6 @@ export type ProblemRegion = {
   bounds: Rect;
   confidence: number;
   associatedAuxiliaryIds: string[];
-  cropFilename?: string;
 };
 
 export type WorksheetItem = {
@@ -44,19 +43,12 @@ export type ConfidenceSummary = {
   lowConfidenceCount: number;
 };
 
-export type JobRecord = {
-  id: string;
-  status: JobStatus;
-  createdAt: string;
-  updatedAt: string;
-  originalFilename: string;
-  uploadPath: string;
-  pdfPath?: string;
-  sourceImage?: SourceImageMetadata;
+export type WorksheetResult = {
+  sourceImage: SourceImageMetadata;
   problemRegions: ProblemRegion[];
   worksheetItems: WorksheetItem[];
   confidenceSummary: ConfidenceSummary;
   pageCount: number;
   itemCount: number;
-  error?: string;
+  pdfUrl: string;
 };

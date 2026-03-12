@@ -1,23 +1,13 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-
 import { PDFDocument, PDFImage, PDFPage, rgb } from "pdf-lib";
-import sharp from "sharp";
 
-import {
-  clearActiveJob,
-  getActiveJob,
-  getJobRecord,
-  jobPath,
-  persistJob,
-  setActiveJob,
-} from "@/lib/jobs";
 import type {
   ConfidenceSummary,
-  JobRecord,
   LayoutMode,
   ProblemRegion,
   Rect,
+  SourceImageMetadata,
   WorksheetItem,
+  WorksheetResult,
 } from "@/lib/types";
 
 const MAX_UPLOAD_BYTES = 12 * 1024 * 1024;
@@ -27,18 +17,9 @@ type LineBand = Rect & { density: number };
 
 type CropAsset = {
   regionId: string;
-  filename: string;
-  buffer: Buffer;
+  bytes: Uint8Array;
   width: number;
   height: number;
-};
-
-type AnalysisResult = {
-  width: number;
-  height: number;
-  regions: ProblemRegion[];
-  crops: CropAsset[];
-  confidenceSummary: ConfidenceSummary;
 };
 
 type RegionCandidate = {
@@ -47,7 +28,111 @@ type RegionCandidate = {
   associatedAuxiliaryIds: string[];
 };
 
-export function assertUpload(file: File) {
+export async function processWorksheetFile(file: File): Promise<WorksheetResult> {
+  assertUpload(file);
+
+  const bitmap = await createImageBitmap(file);
+  const scale = bitmap.width > 1700 ? 1700 / bitmap.width : 1;
+  const width = Math.max(1, Math.round(bitmap.width * scale));
+  const height = Math.max(1, Math.round(bitmap.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) {
+    throw new Error("Canvas is not available in this browser.");
+  }
+
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, width, height);
+  context.drawImage(bitmap, 0, 0, width, height);
+
+  const imageData = context.getImageData(0, 0, width, height);
+  const grayscale = new Uint8Array(width * height);
+  for (let offset = 0, pixel = 0; offset < imageData.data.length; offset += 4, pixel += 1) {
+    const red = imageData.data[offset];
+    const green = imageData.data[offset + 1];
+    const blue = imageData.data[offset + 2];
+    grayscale[pixel] = Math.round(red * 0.299 + green * 0.587 + blue * 0.114);
+  }
+
+  const mask = buildDarkMask(grayscale);
+  const contentBounds = detectContentBounds(mask, width, height);
+  const bands = detectLineBands(mask, width, height, contentBounds);
+  const baseRegions = groupBandsIntoRegions(bands, contentBounds, width);
+  const auxiliaryRegions = detectAuxiliaryRegions(mask, width, height, contentBounds, baseRegions);
+  const mergedRegions = mergeRegions(baseRegions, auxiliaryRegions, width, height);
+  const problemRegions: ProblemRegion[] = mergedRegions.map((region, index) => ({
+    id: `region-${index + 1}`,
+    bounds: padRect(region.bounds, width, height, 18),
+    confidence: clamp(region.confidence, 0.22, 0.99),
+    associatedAuxiliaryIds: region.associatedAuxiliaryIds,
+  }));
+
+  const crops = await Promise.all(
+    problemRegions.map(async (region) => {
+      const cropCanvas = document.createElement("canvas");
+      cropCanvas.width = Math.max(1, Math.round(region.bounds.width));
+      cropCanvas.height = Math.max(1, Math.round(region.bounds.height));
+      const cropContext = cropCanvas.getContext("2d");
+
+      if (!cropContext) {
+        throw new Error("Canvas cropping is not available in this browser.");
+      }
+
+      cropContext.fillStyle = "#ffffff";
+      cropContext.fillRect(0, 0, cropCanvas.width, cropCanvas.height);
+      cropContext.drawImage(
+        canvas,
+        Math.round(region.bounds.left),
+        Math.round(region.bounds.top),
+        Math.round(region.bounds.width),
+        Math.round(region.bounds.height),
+        0,
+        0,
+        cropCanvas.width,
+        cropCanvas.height,
+      );
+
+      const blob = await canvasToBlob(cropCanvas);
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+
+      return {
+        regionId: region.id,
+        bytes,
+        width: cropCanvas.width,
+        height: cropCanvas.height,
+      };
+    }),
+  );
+
+  const pdf = await buildWorksheetPdf(crops);
+
+  const pdfBytes = new Uint8Array(pdf.bytes.byteLength);
+  pdfBytes.set(pdf.bytes);
+
+  return {
+    sourceImage: {
+      width,
+      height,
+      mimeType: file.type,
+      sizeBytes: file.size,
+    } satisfies SourceImageMetadata,
+    problemRegions,
+    worksheetItems: pdf.items,
+    confidenceSummary: summarizeConfidence(problemRegions),
+    pageCount: pdf.pageCount,
+    itemCount: problemRegions.length,
+    pdfUrl: URL.createObjectURL(new Blob([pdfBytes], { type: "application/pdf" })),
+  };
+}
+
+export function revokeWorksheetResult(result: WorksheetResult) {
+  URL.revokeObjectURL(result.pdfUrl);
+}
+
+function assertUpload(file: File) {
   if (!ACCEPTED_MIME_TYPES.has(file.type)) {
     throw new Error("Upload a PNG, JPEG, or WebP image.");
   }
@@ -57,155 +142,11 @@ export function assertUpload(file: File) {
   }
 }
 
-export async function ensureJobProcessed(jobId: string): Promise<JobRecord> {
-  const current = await getJobRecord(jobId);
-
-  if (!current) {
-    throw new Error("Job not found.");
-  }
-
-  if (current.status === "complete" || current.status === "failed") {
-    return current;
-  }
-
-  const active = getActiveJob(jobId);
-  if (active) {
-    return active;
-  }
-
-  const promise = processJob(jobId).finally(() => {
-    clearActiveJob(jobId);
-  });
-
-  setActiveJob(jobId, promise);
-  return promise;
-}
-
-async function processJob(jobId: string): Promise<JobRecord> {
-  const job = await getJobRecord(jobId);
-
-  if (!job) {
-    throw new Error("Job not found.");
-  }
-
-  job.status = "processing";
-  job.error = undefined;
-  await persistJob(job);
-
-  try {
-    const uploadBuffer = await readFile(job.uploadPath);
-    const analysis = await analyzeWorksheet(job.id, uploadBuffer);
-    const pdf = await buildWorksheetPdf(analysis.crops);
-    const pdfPath = jobPath(job.id, "worksheet.pdf");
-
-    await writeFile(pdfPath, pdf.buffer);
-
-    job.status = "complete";
-    job.pdfPath = pdfPath;
-    job.sourceImage = {
-      width: analysis.width,
-      height: analysis.height,
-      mimeType: "image/png",
-      sizeBytes: uploadBuffer.length,
-    };
-    job.problemRegions = analysis.regions;
-    job.worksheetItems = pdf.items;
-    job.itemCount = analysis.regions.length;
-    job.pageCount = pdf.pageCount;
-    job.confidenceSummary = analysis.confidenceSummary;
-    await persistJob(job);
-  } catch (error) {
-    job.status = "failed";
-    job.error =
-      error instanceof Error ? error.message : "An unknown processing error occurred.";
-    await persistJob(job);
-  }
-
-  return job;
-}
-
-async function analyzeWorksheet(jobId: string, input: Buffer): Promise<AnalysisResult> {
-  const base = sharp(input, { failOn: "none" }).rotate();
-  const originalMeta = await base.metadata();
-  const resizeWidth =
-    originalMeta.width && originalMeta.width > 1700 ? 1700 : originalMeta.width;
-
-  const prepared = sharp(input, { failOn: "none" })
-    .rotate()
-    .resize({
-      width: resizeWidth,
-      withoutEnlargement: true,
-    })
-    .normalise();
-
-  const normalizedBuffer = await prepared.clone().png().toBuffer();
-  const grayscale = await prepared
-    .clone()
-    .grayscale()
-    .raw()
-    .toBuffer({ resolveWithObject: true });
-
-  const width = grayscale.info.width;
-  const height = grayscale.info.height;
-  const mask = buildDarkMask(grayscale.data);
-  const contentBounds = detectContentBounds(mask, width, height);
-  const bands = detectLineBands(mask, width, height, contentBounds);
-  const baseRegions = groupBandsIntoRegions(bands, contentBounds, width);
-  const auxiliaryRegions = detectAuxiliaryRegions(mask, width, height, contentBounds, baseRegions);
-  const mergedRegions = mergeRegions(baseRegions, auxiliaryRegions, width, height);
-  const paddedRegions: ProblemRegion[] = mergedRegions.map((region, index) => ({
-    id: `region-${index + 1}`,
-    bounds: padRect(region.bounds, width, height, 18),
-    confidence: clamp(region.confidence, 0.22, 0.99),
-    associatedAuxiliaryIds: region.associatedAuxiliaryIds,
-  }));
-
-  await mkdir(jobPath(jobId, "crops"), { recursive: true });
-
-  const crops = await Promise.all(
-    paddedRegions.map(async (region) => {
-      const cropBuffer = await sharp(normalizedBuffer)
-        .extract({
-          left: Math.round(region.bounds.left),
-          top: Math.round(region.bounds.top),
-          width: Math.round(region.bounds.width),
-          height: Math.round(region.bounds.height),
-        })
-        .png()
-        .toBuffer();
-
-      const filename = `${region.id}.png`;
-      await writeFile(jobPath(jobId, "crops", filename), cropBuffer);
-
-      return {
-        regionId: region.id,
-        filename,
-        buffer: cropBuffer,
-        width: Math.round(region.bounds.width),
-        height: Math.round(region.bounds.height),
-      };
-    }),
-  );
-
-  return {
-    width,
-    height,
-    regions: paddedRegions.map((region) => ({
-      ...region,
-      cropFilename: `${region.id}.png`,
-    })),
-    crops,
-    confidenceSummary: summarizeConfidence(paddedRegions),
-  };
-}
-
-function buildDarkMask(grayscale: Buffer) {
+function buildDarkMask(grayscale: Uint8Array) {
   const mask = new Uint8Array(grayscale.length);
-
   for (let index = 0; index < grayscale.length; index += 1) {
     mask[index] = grayscale[index] < 208 ? 1 : 0;
   }
-
   return mask;
 }
 
@@ -475,7 +416,7 @@ async function buildWorksheetPdf(crops: CropAsset[]) {
   let cursorY = pageHeight - margin;
 
   for (const crop of crops) {
-    const image = await pdf.embedPng(crop.buffer);
+    const image = await pdf.embedPng(crop.bytes);
     const layoutMode = chooseLayoutMode(crop.width, crop.height);
     const placement = measureItem(layoutMode, crop.width, crop.height, contentWidth);
 
@@ -505,7 +446,7 @@ async function buildWorksheetPdf(crops: CropAsset[]) {
   }
 
   return {
-    buffer: Buffer.from(await pdf.save()),
+    bytes: await pdf.save(),
     pageCount: pdf.getPageCount(),
     items,
   };
@@ -731,4 +672,17 @@ function findLastIndex<T>(values: T[], predicate: (value: T) => boolean) {
   }
 
   return -1;
+}
+
+function canvasToBlob(canvas: HTMLCanvasElement) {
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error("Unable to create an image crop."));
+        return;
+      }
+
+      resolve(blob);
+    }, "image/png");
+  });
 }

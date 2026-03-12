@@ -2,22 +2,15 @@
 
 ## V1 flow
 
-1. The browser uploads a single image to `POST /api/jobs`.
-2. The server stores the upload under a per-job workspace in `.worksheet-data/`.
-3. The client polls `GET /api/jobs/:jobId`.
-4. The first status request triggers on-demand processing:
-   - normalize the image
-   - detect content bounds
-   - convert line bands into prompt regions
-   - attach nearby orphan diagrams
-   - crop each region
-   - place each crop into a worksheet layout
-   - generate a PDF
-5. The finished worksheet is returned from `GET /api/jobs/:jobId/pdf`.
+1. The browser loads a single worksheet image.
+2. Canvas processing normalizes the image and computes a grayscale mask.
+3. The app detects content bounds, line bands, and problem regions.
+4. Nearby auxiliary regions such as diagrams are attached to the closest prompt.
+5. Each region is cropped in-browser and placed into a worksheet layout.
+6. `pdf-lib` generates the final PDF in memory and exposes it as a download blob URL.
 
 ## Detection approach
 
-- Image normalization uses `sharp` rotation, bounded resizing, and contrast normalization.
 - Prompt segmentation is CV-first rather than OCR-first.
 - Dense rows of ink are grouped into line bands.
 - Nearby line bands are merged into problem regions.
@@ -26,6 +19,5 @@
 
 ## Extensibility
 
-- The `JobRecord`, `ProblemRegion`, and `WorksheetItem` types are stable enough to support manual review later.
-- Storage is isolated behind job paths so local disk can be replaced with blob storage.
-- The polling API and on-demand processing can be swapped for a durable worker queue without changing the browser contract.
+- The `ProblemRegion` and `WorksheetItem` types are stable enough to support manual review later.
+- If the app later moves off GitHub Pages, the current browser pipeline can be wrapped in server endpoints without rethinking the worksheet model.
