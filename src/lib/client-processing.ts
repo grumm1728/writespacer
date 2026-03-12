@@ -354,7 +354,7 @@ function detectAnchorCandidates(
   rowSegments: RowSegment[],
   contentBounds: Rect,
 ) {
-  const anchors: AnchorCandidate[] = [];
+  const primaryAnchors: AnchorCandidate[] = [];
 
   for (const row of rows) {
     const segments = rowSegments
@@ -393,19 +393,89 @@ function detectAnchorCandidates(
         continue;
       }
 
-      anchors.push({
-        id: `anchor-${anchors.length + 1}`,
+      primaryAnchors.push({
+        id: `anchor-${primaryAnchors.length + 1}`,
         rect: segment.rect,
         row,
         score,
-        inferredNumber: anchors.length + 1,
+        inferredNumber: primaryAnchors.length + 1,
       });
     }
   }
 
-  return dedupeAnchors(anchors)
+  const relaxedAnchors =
+    primaryAnchors.length >= 4
+      ? primaryAnchors
+      : synthesizeFallbackAnchors(rows, rowSegments, contentBounds, primaryAnchors);
+
+  return dedupeAnchors(relaxedAnchors)
     .sort(compareReadingOrder)
     .map((anchor, index) => ({ ...anchor, inferredNumber: index + 1 }));
+}
+
+function synthesizeFallbackAnchors(
+  rows: TextRow[],
+  rowSegments: RowSegment[],
+  contentBounds: Rect,
+  existingAnchors: AnchorCandidate[],
+) {
+  const anchors = [...existingAnchors];
+  const leftCutoff = contentBounds.left + Math.min(contentBounds.width * 0.2, 160);
+
+  for (const row of rows) {
+    const segments = rowSegments
+      .filter((segment) => segment.rowId === row.id)
+      .sort((left, right) => left.rect.left - right.rect.left);
+
+    if (segments.length === 0) {
+      continue;
+    }
+
+    const first = segments[0];
+    const second = segments[1];
+    const firstDensity =
+      first.components.reduce((sum, item) => sum + item.density, 0) / first.components.length;
+    const gapToSecond = second
+      ? second.rect.left - (first.rect.left + first.rect.width)
+      : 0;
+    const startsLikeProblem =
+      first.rect.left < leftCutoff &&
+      first.rect.width < Math.min(110, row.rect.width * 0.24) &&
+      first.rect.height <= row.rect.height * 1.6 &&
+      (Boolean(second) || row.rect.width > first.rect.width * 2.2);
+
+    if (!startsLikeProblem) {
+      continue;
+    }
+
+    const overlapsExisting = anchors.some((anchor) =>
+      intersects(
+        padRect(anchor.rect, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, 6),
+        first.rect,
+      ),
+    );
+
+    if (overlapsExisting) {
+      continue;
+    }
+
+    const score =
+      0.34 +
+      (firstDensity > 0.2 ? 0.12 : 0.05) +
+      (second ? 0.16 : 0.1) +
+      (gapToSecond > Math.max(4, row.rect.height * 0.08) ? 0.12 : 0.05) +
+      (row.rect.width > first.rect.width * 2 ? 0.12 : 0.06);
+
+    anchors.push({
+      id: `anchor-${anchors.length + 1}`,
+      rect: first.rect,
+      row,
+      score,
+      inferredNumber: anchors.length + 1,
+    });
+  }
+
+  return anchors;
 }
 
 function dedupeAnchors(anchors: AnchorCandidate[]) {
