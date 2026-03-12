@@ -2,6 +2,8 @@ export type LayoutMode = "side" | "below";
 
 export type WorksheetStatus = "idle" | "processing" | "complete" | "failed";
 
+export type CompositionMode = "composite-stack" | "union-fallback";
+
 export type Rect = {
   left: number;
   top: number;
@@ -9,11 +11,38 @@ export type Rect = {
   height: number;
 };
 
-export type ProblemRegion = {
+export type InputProblemFragmentKind =
+  | "anchor"
+  | "content"
+  | "diagram"
+  | "section-header";
+
+export type InputProblemFragment = {
   id: string;
-  bounds: Rect;
+  kind: InputProblemFragmentKind;
+  rect: Rect;
   confidence: number;
-  associatedAuxiliaryIds: string[];
+};
+
+export type SectionHeader = {
+  id: string;
+  rects: Rect[];
+  unionBounds: Rect;
+  confidence: number;
+};
+
+export type InputProblemRegion = {
+  id: string;
+  problemNumber: number | null;
+  orderIndex: number;
+  anchorRect: Rect;
+  contentRects: Rect[];
+  sectionHeaderRects: Rect[];
+  unionBounds: Rect;
+  confidence: number;
+  fragments: InputProblemFragment[];
+  compositionMode: CompositionMode;
+  columnHint: number;
 };
 
 export type WorksheetItem = {
@@ -21,6 +50,9 @@ export type WorksheetItem = {
   regionId: string;
   pageIndex: number;
   layoutMode: LayoutMode;
+  compositionMode: CompositionMode;
+  problemNumber: number | null;
+  columnSpan: 1 | 2 | 3;
   promptSize: {
     width: number;
     height: number;
@@ -45,8 +77,9 @@ export type ConfidenceSummary = {
 
 export type WorksheetResult = {
   sourceImage: SourceImageMetadata;
-  problemRegions: ProblemRegion[];
+  problemRegions: InputProblemRegion[];
   worksheetItems: WorksheetItem[];
+  sectionHeaders: SectionHeader[];
   confidenceSummary: ConfidenceSummary;
   pageCount: number;
   itemCount: number;

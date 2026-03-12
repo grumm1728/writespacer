@@ -70,6 +70,10 @@ export function WorksheetApp() {
   const confidencePct = result
     ? Math.round(result.confidenceSummary.averageConfidence * 100)
     : null;
+  const detectedProblems = result?.problemRegions
+    .map((region) => region.problemNumber ?? region.orderIndex + 1)
+    .slice(0, 12)
+    .join(", ");
 
   return (
     <main className="app-shell">
@@ -179,6 +183,20 @@ export function WorksheetApp() {
               <div className="item-card">
                 <h4>Confidence</h4>
                 <p>{confidencePct !== null ? `${confidencePct}%` : "Not ready"}</p>
+              </div>
+            </div>
+            <div className="status-grid">
+              <div className="item-card">
+                <h4>Low-confidence regions</h4>
+                <p>
+                  {result
+                    ? result.confidenceSummary.lowConfidenceCount
+                    : "0"}
+                </p>
+              </div>
+              <div className="item-card">
+                <h4>Problem order</h4>
+                <p>{detectedProblems || "Not ready"}</p>
               </div>
             </div>
             {result ? (
