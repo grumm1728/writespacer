@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { processWorksheetFile, revokeWorksheetResult } from "@/lib/client-processing";
-import type { WorksheetResult, WorksheetStatus } from "@/lib/types";
+import type { Rect, WorksheetResult, WorksheetStatus } from "@/lib/types";
 
 const ACCEPT = "image/png,image/jpeg,image/webp";
 
@@ -19,6 +19,8 @@ export function WorksheetApp() {
   const [result, setResult] = useState<WorksheetResult | null>(null);
   const [status, setStatus] = useState<WorksheetStatus>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [showDebugOverlay, setShowDebugOverlay] = useState(true);
 
   useEffect(() => {
     return () => {
@@ -27,6 +29,14 @@ export function WorksheetApp() {
       }
     };
   }, [result]);
+
+  useEffect(() => {
+    return () => {
+      if (previewUrl) {
+        URL.revokeObjectURL(previewUrl);
+      }
+    };
+  }, [previewUrl]);
 
   async function handleSubmit() {
     if (!file) {
@@ -60,11 +70,15 @@ export function WorksheetApp() {
     if (result) {
       revokeWorksheetResult(result);
     }
+    if (previewUrl) {
+      URL.revokeObjectURL(previewUrl);
+    }
 
     setFile(null);
     setResult(null);
     setError(null);
     setStatus("idle");
+    setPreviewUrl(null);
   }
 
   const confidencePct = result
@@ -130,7 +144,11 @@ export function WorksheetApp() {
               type="file"
               onChange={(event) => {
                 const nextFile = event.target.files?.[0] ?? null;
+                if (previewUrl) {
+                  URL.revokeObjectURL(previewUrl);
+                }
                 setFile(nextFile);
+                setPreviewUrl(nextFile ? URL.createObjectURL(nextFile) : null);
                 setError(null);
               }}
             />
@@ -168,6 +186,86 @@ export function WorksheetApp() {
               {error ? <p style={{ color: "var(--error)" }}>{error}</p> : null}
             </div>
           </div>
+
+          {previewUrl && result ? (
+            <div className="debug-panel">
+              <div className="debug-header">
+                <h3>Debug overlay</h3>
+                <label className="toggle">
+                  <input
+                    checked={showDebugOverlay}
+                    onChange={(event) => setShowDebugOverlay(event.target.checked)}
+                    type="checkbox"
+                  />
+                  <span>Show boxes</span>
+                </label>
+              </div>
+              <div
+                className="debug-canvas"
+                style={
+                  {
+                    "--image-width": result.sourceImage.width,
+                    "--image-height": result.sourceImage.height,
+                  } as React.CSSProperties
+                }
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img alt="Uploaded worksheet preview" src={previewUrl} />
+                {showDebugOverlay ? (
+                  <>
+                    {result.sectionHeaders.map((header, index) => (
+                      <OverlayRect
+                        key={header.id}
+                        label={`Header ${index + 1}`}
+                        rect={header.unionBounds}
+                        imageHeight={result.sourceImage.height}
+                        imageWidth={result.sourceImage.width}
+                        tone="header"
+                      />
+                    ))}
+                    {result.problemRegions.map((region) => (
+                      <div key={region.id}>
+                        <OverlayRect
+                          label={`${region.problemNumber ?? region.orderIndex + 1}`}
+                          rect={region.unionBounds}
+                          imageHeight={result.sourceImage.height}
+                          imageWidth={result.sourceImage.width}
+                          tone="region"
+                        />
+                        <OverlayRect
+                          label=""
+                          rect={region.anchorRect}
+                          imageHeight={result.sourceImage.height}
+                          imageWidth={result.sourceImage.width}
+                          tone="anchor"
+                        />
+                        {region.contentRects.map((rect, index) => (
+                          <OverlayRect
+                            key={`${region.id}-content-${index + 1}`}
+                            label=""
+                            rect={rect}
+                            imageHeight={result.sourceImage.height}
+                            imageWidth={result.sourceImage.width}
+                            tone="content"
+                          />
+                        ))}
+                        {region.sectionHeaderRects.map((rect, index) => (
+                          <OverlayRect
+                            key={`${region.id}-header-${index + 1}`}
+                            label=""
+                            rect={rect}
+                            imageHeight={result.sourceImage.height}
+                            imageWidth={result.sourceImage.width}
+                            tone="header"
+                          />
+                        ))}
+                      </div>
+                    ))}
+                  </>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
 
           <aside className="status-card">
             <h3>Output</h3>
@@ -210,5 +308,35 @@ export function WorksheetApp() {
         </div>
       </section>
     </main>
+  );
+}
+
+function OverlayRect({
+  imageHeight,
+  imageWidth,
+  label,
+  rect,
+  tone,
+}: {
+  imageHeight: number;
+  imageWidth: number;
+  label: string;
+  rect: Rect;
+  tone: "region" | "anchor" | "content" | "header";
+}) {
+  return (
+    <div
+      className={`overlay-rect ${tone}`}
+      style={
+        {
+          left: `${(rect.left / imageWidth) * 100}%`,
+          top: `${(rect.top / imageHeight) * 100}%`,
+          width: `${(rect.width / imageWidth) * 100}%`,
+          height: `${(rect.height / imageHeight) * 100}%`,
+        } as React.CSSProperties
+      }
+    >
+      {label ? <span>{label}</span> : null}
+    </div>
   );
 }
