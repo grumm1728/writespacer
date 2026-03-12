@@ -92,11 +92,15 @@ export async function processWorksheetFile(file: File): Promise<WorksheetResult>
   const anchors = detectAnchorCandidates(textRows, rowSegments, contentBounds);
   const sectionHeaders = detectSectionHeaders(textRows, anchors, contentBounds, width, height);
   const zones = buildOwnershipZones(anchors, contentBounds, width, height);
+  const effectiveZones =
+    zones.length > 0
+      ? zones
+      : buildFallbackZonesFromRows(textRows, rowSegments, contentBounds, width, height);
   const problemRegions = buildProblemRegions(
     components,
     rowSegments,
     sectionHeaders,
-    zones,
+    effectiveZones,
     width,
     height,
   );
@@ -679,6 +683,99 @@ function buildOwnershipZones(
   return zones.sort(
     (left, right) => (left.anchor.inferredNumber ?? left.orderIndex) - (right.anchor.inferredNumber ?? right.orderIndex),
   );
+}
+
+function buildFallbackZonesFromRows(
+  rows: TextRow[],
+  rowSegments: RowSegment[],
+  contentBounds: Rect,
+  width: number,
+  height: number,
+) {
+  const syntheticAnchors: AnchorCandidate[] = [];
+  const leftMargin = contentBounds.left + Math.min(120, contentBounds.width * 0.12);
+  const estimatedSplit = contentBounds.left + contentBounds.width / 2;
+  const rightMarginBand = estimatedSplit - Math.min(70, contentBounds.width * 0.08);
+
+  for (const row of [...rows].sort((left, right) => left.rect.top - right.rect.top)) {
+    const segments = rowSegments
+      .filter((segment) => segment.rowId === row.id)
+      .sort((left, right) => left.rect.left - right.rect.left);
+    if (segments.length === 0) {
+      continue;
+    }
+
+    const first = segments[0];
+    const rowLooksLikeHeader =
+      row.rect.width > contentBounds.width * 0.34 &&
+      row.rect.height > 18 &&
+      first.rect.left < leftMargin;
+
+    if (rowLooksLikeHeader) {
+      continue;
+    }
+
+    for (let index = 0; index < segments.length; index += 1) {
+      const segment = segments[index];
+      const previous = segments[index - 1] ?? null;
+      const next = segments[index + 1] ?? null;
+      const startsNearLeft = segment.rect.left <= leftMargin;
+      const startsNearRight = segment.rect.left >= rightMarginBand;
+      const gapBefore = previous
+        ? segment.rect.left - (previous.rect.left + previous.rect.width)
+        : Number.POSITIVE_INFINITY;
+      const gapAfter = next
+        ? next.rect.left - (segment.rect.left + segment.rect.width)
+        : 0;
+      const compactLead =
+        segment.rect.width < Math.min(115, Math.max(34, row.rect.width * 0.26));
+      const rowHasSubstantialContent =
+        row.rect.width > Math.max(120, contentBounds.width * 0.15);
+      const likelyProblemStart =
+        rowHasSubstantialContent &&
+        (startsNearLeft ||
+          startsNearRight ||
+          gapBefore > Math.max(18, row.rect.height * 0.45)) &&
+        (compactLead ||
+          gapAfter > Math.max(8, row.rect.height * 0.12) ||
+          (next !== null && next.rect.width > segment.rect.width * 1.15));
+
+      if (!likelyProblemStart) {
+        continue;
+      }
+
+      const overlapsExisting = syntheticAnchors.some((anchor) =>
+        intersects(
+          padRect(anchor.rect, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, 6),
+          segment.rect,
+        ),
+      );
+      if (overlapsExisting) {
+        continue;
+      }
+
+      const score =
+        0.34 +
+        (compactLead ? 0.16 : 0.08) +
+        (startsNearLeft || startsNearRight ? 0.14 : 0.06) +
+        (gapAfter > Math.max(8, row.rect.height * 0.12) ? 0.12 : 0.05) +
+        (next !== null ? 0.08 : 0.03);
+
+      syntheticAnchors.push({
+        id: `fallback-anchor-${syntheticAnchors.length + 1}`,
+        rect: segment.rect,
+        row,
+        score,
+        inferredNumber: null,
+      });
+    }
+  }
+
+  const deduped = dedupeAnchors(syntheticAnchors)
+    .sort(compareReadingOrder)
+    .map((anchor, index) => ({ ...anchor, inferredNumber: index + 1 }));
+
+  return buildOwnershipZones(deduped, contentBounds, width, height);
 }
 
 function estimateColumnSplit(anchors: AnchorCandidate[], contentBounds: Rect) {
