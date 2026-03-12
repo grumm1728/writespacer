@@ -296,7 +296,7 @@ function buildRowSegments(rows: TextRow[], width: number, height: number) {
   for (const row of rows) {
     const sorted = [...row.components].sort((left, right) => left.left - right.left);
     let group: ConnectedComponent[] = [];
-    const splitGap = Math.max(18, row.rect.height * 1.15);
+    const splitGap = Math.max(8, row.rect.height * 0.32);
 
     for (const component of sorted) {
       const previous = group.at(-1);
@@ -372,24 +372,24 @@ function detectAnchorCandidates(
         segment.components.reduce((sum, item) => sum + item.density, 0) / segment.components.length;
       const gapToNext = next.rect.left - (segment.rect.left + segment.rect.width);
       const likelyAnchor =
-        segment.rect.width < Math.min(90, row.rect.width * 0.22) &&
+        segment.rect.width < Math.min(84, row.rect.width * 0.18) &&
         segment.rect.height <= row.rect.height * 1.4 &&
-        next.rect.width > segment.rect.width * 1.15 &&
-        gapToNext > Math.max(8, row.rect.height * 0.2);
+        next.rect.width > segment.rect.width * 1.05 &&
+        gapToNext > Math.max(4, row.rect.height * 0.08);
 
       if (!likelyAnchor) {
         continue;
       }
 
       const score =
-        (segment.rect.width < Math.min(70, row.rect.width * 0.18) ? 0.22 : 0.1) +
+        (segment.rect.width < Math.min(64, row.rect.width * 0.16) ? 0.24 : 0.12) +
         (segmentDensity > 0.22 ? 0.18 : 0.08) +
-        (next.rect.width > segment.rect.width * 2 ? 0.16 : 0.06) +
-        (gapToNext > row.rect.height * 0.35 ? 0.14 : 0.06) +
-        (segment.rect.left < contentBounds.left + contentBounds.width * 0.55 ? 0.1 : 0.06) +
-        (segment.components.length <= 4 ? 0.1 : 0.03);
+        (next.rect.width > segment.rect.width * 1.6 ? 0.16 : 0.08) +
+        (gapToNext > row.rect.height * 0.12 ? 0.12 : 0.08) +
+        (segment.rect.left < contentBounds.left + contentBounds.width * 0.62 ? 0.1 : 0.05) +
+        (segment.components.length <= 5 ? 0.12 : 0.04);
 
-      if (score < 0.54) {
+      if (score < 0.58) {
         continue;
       }
 
@@ -682,21 +682,7 @@ function buildAssignedContentRects(
         ),
     )
     .sort((left, right) => compareReadingOrder({ rect: left.rect }, { rect: right.rect }));
-  const rects: Rect[] = [];
-
-  for (const segment of filteredSegments) {
-    const rect = padRect(segment.rect, width, height, 4);
-    if (
-      !rects.some((existing) =>
-        intersects(
-          padRect(existing, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, 4),
-          rect,
-        ),
-      )
-    ) {
-      rects.push(rect);
-    }
-  }
+  const rects = mergeSegmentsByRow(filteredSegments, width, height);
 
   const diagramRects = mergeDiagramRects(
     componentsInZone.filter(
@@ -714,6 +700,45 @@ function buildAssignedContentRects(
   );
 
   return combined.length > 0 ? combined : [padRect(anchorRect, width, height, 8)];
+}
+
+function mergeSegmentsByRow(segments: RowSegment[], width: number, height: number) {
+  const byRow = new Map<string, RowSegment[]>();
+
+  for (const segment of segments) {
+    const rowSegments = byRow.get(segment.rowId) ?? [];
+    rowSegments.push(segment);
+    byRow.set(segment.rowId, rowSegments);
+  }
+
+  const merged: Rect[] = [];
+
+  for (const rowSegments of byRow.values()) {
+    const sorted = [...rowSegments].sort((left, right) => left.rect.left - right.rect.left);
+    let current: Rect | null = null;
+
+    for (const segment of sorted) {
+      const rect = padRect(segment.rect, width, height, 4);
+      if (!current) {
+        current = rect;
+        continue;
+      }
+
+      const gap = rect.left - (current.left + current.width);
+      if (gap <= Math.max(18, current.height * 0.9)) {
+        current = padRect(unionRects([current, rect]), width, height, 2);
+      } else {
+        merged.push(current);
+        current = rect;
+      }
+    }
+
+    if (current) {
+      merged.push(current);
+    }
+  }
+
+  return merged.sort((left, right) => compareReadingOrder({ rect: left }, { rect: right }));
 }
 
 function mergeDiagramRects(
@@ -882,6 +907,7 @@ async function buildWorksheetPdf(crops: CropAsset[]) {
   const margin = 36;
   const gutter = 18;
   const contentWidth = pageWidth - margin * 2;
+  const threeColumnWidth = (contentWidth - gutter * 2) / 3;
   const twoColumnWidth = (contentWidth - gutter) / 2;
   const rows = buildLayoutRows(crops);
   const items: WorksheetItem[] = [];
@@ -893,14 +919,20 @@ async function buildWorksheetPdf(crops: CropAsset[]) {
   for (const row of rows) {
     const placements = row.map((crop, index) => {
       const columnSpan = chooseColumnSpan(crop);
-      const slotWidth = columnSpan === 2 ? contentWidth : twoColumnWidth;
+      const slotWidth =
+        row.length === 3 ? threeColumnWidth : row.length === 2 ? twoColumnWidth : contentWidth;
       const layoutMode = chooseLayoutMode(crop, slotWidth);
       const placement = measureItem(layoutMode, crop.width, crop.height, slotWidth, crop.classification);
       return {
         crop,
         columnSpan,
         placement,
-        x: columnSpan === 2 ? margin : index === 0 ? margin : margin + twoColumnWidth + gutter,
+        x:
+          row.length === 3
+            ? margin + index * (threeColumnWidth + gutter)
+            : row.length === 2
+              ? margin + index * (twoColumnWidth + gutter)
+              : margin,
       };
     });
 
@@ -949,21 +981,38 @@ function buildLayoutRows(crops: CropAsset[]) {
 
   while (index < crops.length) {
     const current = crops[index];
-    if (chooseColumnSpan(current) === 2) {
+    if (chooseColumnSpan(current) === 3) {
       rows.push([current]);
       index += 1;
       continue;
     }
 
-    const next = crops[index + 1];
-    if (next && chooseColumnSpan(next) === 1) {
-      rows.push([current, next]);
-      index += 2;
+    if (current.classification === "simple") {
+      const simpleRow = [current];
+      let lookahead = index + 1;
+      while (
+        simpleRow.length < 3 &&
+        lookahead < crops.length &&
+        crops[lookahead].classification === "simple"
+      ) {
+        simpleRow.push(crops[lookahead]);
+        lookahead += 1;
+      }
+
+      rows.push(simpleRow);
+      index += simpleRow.length;
       continue;
     }
 
-    rows.push([current]);
-    index += 1;
+    const pair = [current];
+    if (index + 1 < crops.length && chooseColumnSpan(crops[index + 1]) !== 3) {
+      pair.push(crops[index + 1]);
+      index += 2;
+    } else {
+      index += 1;
+    }
+
+    rows.push(pair);
   }
 
   return rows;
@@ -971,6 +1020,10 @@ function buildLayoutRows(crops: CropAsset[]) {
 
 function chooseColumnSpan(crop: CropAsset): 1 | 2 | 3 {
   if (crop.classification === "complex" || crop.height > 260) {
+    return 3;
+  }
+
+  if (crop.classification === "standard") {
     return 2;
   }
 
