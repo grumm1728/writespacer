@@ -31,6 +31,13 @@ type TextRow = {
   density: number;
 };
 
+type RowSegment = {
+  id: string;
+  rowId: string;
+  rect: Rect;
+  components: ConnectedComponent[];
+};
+
 type AnchorCandidate = {
   id: string;
   rect: Rect;
@@ -81,12 +88,13 @@ export async function processWorksheetFile(file: File): Promise<WorksheetResult>
   const contentBounds = detectContentBounds(mask, width, height);
   const components = detectConnectedComponents(mask, width, height, contentBounds);
   const textRows = buildTextRows(components, contentBounds, width, height);
-  const anchors = detectAnchorCandidates(textRows, contentBounds);
+  const rowSegments = buildRowSegments(textRows, width, height);
+  const anchors = detectAnchorCandidates(textRows, rowSegments, contentBounds);
   const sectionHeaders = detectSectionHeaders(textRows, anchors, contentBounds, width, height);
   const zones = buildOwnershipZones(anchors, contentBounds, width, height);
   const problemRegions = buildProblemRegions(
     components,
-    textRows,
+    rowSegments,
     sectionHeaders,
     zones,
     width,
@@ -282,52 +290,117 @@ function makeRow(id: number, component: ConnectedComponent): TextRow {
   };
 }
 
-function detectAnchorCandidates(rows: TextRow[], contentBounds: Rect) {
-  const leftCutoff = contentBounds.left + Math.min(contentBounds.width * 0.22, 180);
-  const anchors: AnchorCandidate[] = [];
+function buildRowSegments(rows: TextRow[], width: number, height: number) {
+  const segments: RowSegment[] = [];
 
   for (const row of rows) {
-    const leading = row.components
-      .filter((component) => component.left < leftCutoff)
-      .sort((left, right) => left.left - right.left);
+    const sorted = [...row.components].sort((left, right) => left.left - right.left);
+    let group: ConnectedComponent[] = [];
+    const splitGap = Math.max(18, row.rect.height * 1.15);
 
-    if (leading.length === 0) {
-      continue;
-    }
+    for (const component of sorted) {
+      const previous = group.at(-1);
+      if (!previous) {
+        group = [component];
+        continue;
+      }
 
-    const anchorGroup = [leading[0]];
-    for (let index = 1; index < leading.length; index += 1) {
-      const previous = anchorGroup.at(-1)!;
-      const next = leading[index];
-      const gap = next.left - (previous.left + previous.width);
-      if (gap < row.rect.height * 0.45 && next.width < row.rect.height * 0.95) {
-        anchorGroup.push(next);
+      const gap = component.left - (previous.left + previous.width);
+      if (gap > splitGap) {
+        segments.push(makeSegment(row.id, segments.length + 1, group, width, height));
+        group = [component];
       } else {
-        break;
+        group.push(component);
       }
     }
 
-    const rect = unionRects(anchorGroup);
-    const score =
-      (rect.left <= contentBounds.left + contentBounds.width * 0.08 ? 0.28 : 0.12) +
-      (rect.width < Math.min(90, row.rect.width * 0.24) ? 0.24 : 0.04) +
-      (row.rect.width > rect.width * 2 ? 0.2 : 0.04) +
-      (anchorGroup.reduce((sum, item) => sum + item.density, 0) / anchorGroup.length > 0.22
-        ? 0.18
-        : 0.06) +
-      (anchorGroup.length <= 3 ? 0.12 : 0.02);
+    if (group.length > 0) {
+      segments.push(makeSegment(row.id, segments.length + 1, group, width, height));
+    }
+  }
 
-    if (score < 0.55) {
+  return segments;
+}
+
+function makeSegment(
+  rowId: string,
+  id: number,
+  components: ConnectedComponent[],
+  width: number,
+  height: number,
+): RowSegment {
+  return {
+    id: `segment-${id}`,
+    rowId,
+    rect: padRect(
+      unionRects(
+        components.map((component) => ({
+          left: component.left,
+          top: component.top,
+          width: component.width,
+          height: component.height,
+        })),
+      ),
+      width,
+      height,
+      3,
+    ),
+    components,
+  };
+}
+
+function detectAnchorCandidates(
+  rows: TextRow[],
+  rowSegments: RowSegment[],
+  contentBounds: Rect,
+) {
+  const anchors: AnchorCandidate[] = [];
+
+  for (const row of rows) {
+    const segments = rowSegments
+      .filter((segment) => segment.rowId === row.id)
+      .sort((left, right) => left.rect.left - right.rect.left);
+
+    if (segments.length < 2) {
       continue;
     }
 
-    anchors.push({
-      id: `anchor-${anchors.length + 1}`,
-      rect,
-      row,
-      score,
-      inferredNumber: anchors.length + 1,
-    });
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      const segment = segments[index];
+      const next = segments[index + 1];
+      const segmentDensity =
+        segment.components.reduce((sum, item) => sum + item.density, 0) / segment.components.length;
+      const gapToNext = next.rect.left - (segment.rect.left + segment.rect.width);
+      const likelyAnchor =
+        segment.rect.width < Math.min(90, row.rect.width * 0.22) &&
+        segment.rect.height <= row.rect.height * 1.4 &&
+        next.rect.width > segment.rect.width * 1.15 &&
+        gapToNext > Math.max(8, row.rect.height * 0.2);
+
+      if (!likelyAnchor) {
+        continue;
+      }
+
+      const score =
+        (segment.rect.width < Math.min(70, row.rect.width * 0.18) ? 0.22 : 0.1) +
+        (segmentDensity > 0.22 ? 0.18 : 0.08) +
+        (next.rect.width > segment.rect.width * 2 ? 0.16 : 0.06) +
+        (gapToNext > row.rect.height * 0.35 ? 0.14 : 0.06) +
+        (segment.rect.left < contentBounds.left + contentBounds.width * 0.55 ? 0.1 : 0.06) +
+        (segment.components.length <= 4 ? 0.1 : 0.03);
+
+      if (score < 0.54) {
+        continue;
+      }
+
+      anchors.push({
+        id: `anchor-${anchors.length + 1}`,
+        rect: segment.rect,
+        row,
+        score,
+        inferredNumber: anchors.length + 1,
+      });
+    }
   }
 
   return dedupeAnchors(anchors)
@@ -497,7 +570,7 @@ function partitionAnchorsByColumn(anchors: AnchorCandidate[], split: number) {
 
 function buildProblemRegions(
   components: ConnectedComponent[],
-  rows: TextRow[],
+  rowSegments: RowSegment[],
   sectionHeaders: SectionHeader[],
   zones: OwnershipZone[],
   width: number,
@@ -511,8 +584,12 @@ function buildProblemRegions(
     const componentsInZone = components.filter((component) =>
       rectContains(zone.rect, component.centerX, component.centerY),
     );
-    const rowsInZone = rows.filter((row) =>
-      rectContains(zone.rect, row.rect.left + row.rect.width / 2, row.rect.top + row.rect.height / 2),
+    const segmentsInZone = rowSegments.filter((segment) =>
+      rectContains(
+        zone.rect,
+        segment.rect.left + segment.rect.width / 2,
+        segment.rect.top + segment.rect.height / 2,
+      ),
     );
     const attachedHeader = sectionHeaders.find((header) => {
       if (index > 0) {
@@ -531,7 +608,13 @@ function buildProblemRegions(
       );
     });
 
-    const contentRects = buildAssignedContentRects(rowsInZone, zone.anchor.row, width, height);
+    const contentRects = buildAssignedContentRects(
+      segmentsInZone,
+      zone.anchor.rect,
+      componentsInZone,
+      width,
+      height,
+    );
     const sectionHeaderRects = attachedHeader ? attachedHeader.rects : [];
     const anchorRect = padRect(zone.anchor.rect, width, height, 6);
     const allRects = [...sectionHeaderRects, anchorRect, ...contentRects];
@@ -583,39 +666,26 @@ function buildProblemRegions(
 }
 
 function buildAssignedContentRects(
-  rowsInZone: TextRow[],
-  anchorRow: TextRow,
+  segmentsInZone: RowSegment[],
+  anchorRect: Rect,
+  componentsInZone: ConnectedComponent[],
   width: number,
   height: number,
 ) {
-  const filteredRows = rowsInZone
-    .filter((row) => row.rect.top >= anchorRow.rect.top - 8)
-    .sort((left, right) => left.rect.top - right.rect.top);
+  const filteredSegments = segmentsInZone
+    .filter(
+      (segment) =>
+        segment.rect.top >= anchorRect.top - 8 &&
+        !intersects(
+          padRect(anchorRect, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, 4),
+          segment.rect,
+        ),
+    )
+    .sort((left, right) => compareReadingOrder({ rect: left.rect }, { rect: right.rect }));
   const rects: Rect[] = [];
 
-  for (const row of filteredRows) {
-    const isAnchorRow = row.id === anchorRow.id;
-    let rect = padRect(row.rect, width, height, 6);
-
-    if (isAnchorRow) {
-      const rowComponents = [...row.components].sort((left, right) => left.left - right.left);
-      if (rowComponents.length > 1) {
-        rect = padRect(
-          unionRects(
-            rowComponents.slice(1).map((component) => ({
-              left: component.left,
-              top: component.top,
-              width: component.width,
-              height: component.height,
-            })),
-          ),
-          width,
-          height,
-          6,
-        );
-      }
-    }
-
+  for (const segment of filteredSegments) {
+    const rect = padRect(segment.rect, width, height, 4);
     if (
       !rects.some((existing) =>
         intersects(
@@ -628,7 +698,53 @@ function buildAssignedContentRects(
     }
   }
 
-  return rects.length > 0 ? rects : [padRect(anchorRow.rect, width, height, 8)];
+  const diagramRects = mergeDiagramRects(
+    componentsInZone.filter(
+      (component) =>
+        component.width > 48 &&
+        component.height > 48 &&
+        !rects.some((rect) => intersects(rect, component)),
+    ),
+    width,
+    height,
+  );
+
+  const combined = [...rects, ...diagramRects].sort((left, right) =>
+    compareReadingOrder({ rect: left }, { rect: right }),
+  );
+
+  return combined.length > 0 ? combined : [padRect(anchorRect, width, height, 8)];
+}
+
+function mergeDiagramRects(
+  components: ConnectedComponent[],
+  width: number,
+  height: number,
+) {
+  const merged: Rect[] = [];
+
+  for (const component of components) {
+    const rect = padRect(component, width, height, 6);
+    const existingIndex = merged.findIndex((candidate) =>
+      intersects(
+        padRect(candidate, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, 10),
+        rect,
+      ),
+    );
+
+    if (existingIndex >= 0) {
+      merged[existingIndex] = padRect(
+        unionRects([merged[existingIndex], rect]),
+        width,
+        height,
+        4,
+      );
+    } else {
+      merged.push(rect);
+    }
+  }
+
+  return merged;
 }
 
 function chooseCompositionMode(contentRects: Rect[], unionBounds: Rect, zoneRect: Rect): CompositionMode {
