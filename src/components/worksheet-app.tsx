@@ -6,6 +6,7 @@ import { processWorksheetFile, revokeWorksheetResult } from "@/lib/client-proces
 import type { Rect, WorksheetResult, WorksheetStatus } from "@/lib/types";
 
 const ACCEPT = "image/png,image/jpeg,image/webp";
+const DEFAULT_SAMPLE_PATH = "./fixtures/pershan-problem-set-example.png";
 
 const statusCopy: Record<WorksheetStatus, string> = {
   idle: "Ready",
@@ -38,16 +39,35 @@ export function WorksheetApp() {
     };
   }, [previewUrl]);
 
+  function clearCurrentResult() {
+    if (result) {
+      revokeWorksheetResult(result);
+      setResult(null);
+    }
+  }
+
+  function replacePreview(nextPreviewUrl: string | null) {
+    if (previewUrl) {
+      URL.revokeObjectURL(previewUrl);
+    }
+    setPreviewUrl(nextPreviewUrl);
+  }
+
+  function applySelectedFile(nextFile: File | null, nextPreviewUrl: string | null) {
+    clearCurrentResult();
+    setFile(nextFile);
+    replacePreview(nextPreviewUrl);
+    setError(null);
+    setStatus("idle");
+  }
+
   async function handleSubmit() {
     if (!file) {
       setError("Choose an image before generating a worksheet.");
       return;
     }
 
-    if (result) {
-      revokeWorksheetResult(result);
-      setResult(null);
-    }
+    clearCurrentResult();
 
     setStatus("processing");
     setError(null);
@@ -66,19 +86,34 @@ export function WorksheetApp() {
     }
   }
 
-  function resetFlow() {
-    if (result) {
-      revokeWorksheetResult(result);
-    }
-    if (previewUrl) {
-      URL.revokeObjectURL(previewUrl);
-    }
+  async function loadDefaultSample() {
+    try {
+      const response = await fetch(DEFAULT_SAMPLE_PATH);
+      if (!response.ok) {
+        throw new Error("The default sample image could not be loaded.");
+      }
 
+      const blob = await response.blob();
+      const sampleFile = new File([blob], "pershan-problem-set-example.png", {
+        type: blob.type || "image/png",
+      });
+      applySelectedFile(sampleFile, URL.createObjectURL(blob));
+    } catch (sampleError) {
+      setStatus("failed");
+      setError(
+        sampleError instanceof Error
+          ? sampleError.message
+          : "The default sample image could not be loaded.",
+      );
+    }
+  }
+
+  function resetFlow() {
+    clearCurrentResult();
+    replacePreview(null);
     setFile(null);
-    setResult(null);
     setError(null);
     setStatus("idle");
-    setPreviewUrl(null);
   }
 
   const confidencePct = result
@@ -144,12 +179,7 @@ export function WorksheetApp() {
               type="file"
               onChange={(event) => {
                 const nextFile = event.target.files?.[0] ?? null;
-                if (previewUrl) {
-                  URL.revokeObjectURL(previewUrl);
-                }
-                setFile(nextFile);
-                setPreviewUrl(nextFile ? URL.createObjectURL(nextFile) : null);
-                setError(null);
+                applySelectedFile(nextFile, nextFile ? URL.createObjectURL(nextFile) : null);
               }}
             />
             <div className="dropzone-copy">
@@ -160,12 +190,22 @@ export function WorksheetApp() {
                   {file.name} | {(file.size / 1024 / 1024).toFixed(2)} MB
                 </span>
               ) : (
-                <span className="helper-text">PNG, JPEG, or WebP</span>
+                <span className="helper-text">
+                  PNG, JPEG, or WebP. A built-in sample page is available too.
+                </span>
               )}
               <div className="controls">
                 <label className="button-secondary" htmlFor="worksheet-upload">
                   Choose file
                 </label>
+                <button
+                  className="button-secondary"
+                  disabled={status === "processing"}
+                  onClick={loadDefaultSample}
+                  type="button"
+                >
+                  Use sample page
+                </button>
                 <button
                   className="button"
                   disabled={!file || status === "processing"}

@@ -29,6 +29,12 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000).
 
+## Built-in sample
+
+The repo now includes a committed textbook-style debug fixture at [public/fixtures/pershan-problem-set-example.png](C:/Users/scott/Cloned%20from%20GitHub/writespacer/public/fixtures/pershan-problem-set-example.png).
+
+In the app, use the `Use sample page` button to load that exact image without uploading it manually. This gives us a stable regression case while we improve problem detection and worksheet layout.
+
 ## Environment
 
 - V1 is optimized for one uploaded page at a time.
