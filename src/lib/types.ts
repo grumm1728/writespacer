@@ -1,8 +1,23 @@
 export type LayoutMode = "side" | "below";
 
-export type WorksheetStatus = "idle" | "processing" | "complete" | "failed";
+export type WorksheetStatus =
+  | "idle"
+  | "analyzing"
+  | "reviewing"
+  | "generating"
+  | "complete"
+  | "failed";
 
 export type CompositionMode = "composite-stack" | "union-fallback";
+
+export type LayoutDensity = "compact" | "balanced" | "spacious";
+
+export type PromptScale = "small" | "medium" | "large";
+
+export type WorksheetLayoutOptions = {
+  density: LayoutDensity;
+  promptScale: PromptScale;
+};
 
 export type Rect = {
   left: number;
@@ -31,10 +46,10 @@ export type SectionHeader = {
   confidence: number;
 };
 
-export type InputProblemRegion = {
+export type ProblemDraft = {
   id: string;
-  problemNumber: number | null;
   orderIndex: number;
+  sourceLabel: string | null;
   anchorRect: Rect;
   contentRects: Rect[];
   sectionHeaderRects: Rect[];
@@ -43,6 +58,11 @@ export type InputProblemRegion = {
   fragments: InputProblemFragment[];
   compositionMode: CompositionMode;
   columnHint: number;
+  included: boolean;
+};
+
+export type InputProblemRegion = ProblemDraft & {
+  problemNumber: number | null;
 };
 
 export type WorksheetItem = {
@@ -52,6 +72,7 @@ export type WorksheetItem = {
   layoutMode: LayoutMode;
   compositionMode: CompositionMode;
   problemNumber: number | null;
+  sourceLabel: string | null;
   columnSpan: 1 | 2 | 3;
   promptSize: {
     width: number;
@@ -61,6 +82,33 @@ export type WorksheetItem = {
     width: number;
     height: number;
   };
+};
+
+export type WorksheetPagePlacement =
+  | {
+      id: string;
+      type: "problem";
+      regionId: string;
+      pageIndex: number;
+      sourceLabel: string | null;
+      rect: Rect;
+      prompt: Rect;
+      answerArea: Rect;
+    }
+  | {
+      id: string;
+      type: "section-header";
+      regionId: string;
+      pageIndex: number;
+      sourceRect: Rect;
+      rect: Rect;
+    };
+
+export type WorksheetPreviewPage = {
+  pageIndex: number;
+  width: number;
+  height: number;
+  placements: WorksheetPagePlacement[];
 };
 
 export type SourceImageMetadata = {
@@ -75,6 +123,46 @@ export type ConfidenceSummary = {
   lowConfidenceCount: number;
 };
 
+export type DebugRect = {
+  id: string;
+  rect: Rect;
+};
+
+export type AnchorDebugCandidate = DebugRect & {
+  rowId: string;
+  score: number;
+  accepted: boolean;
+  reason: string;
+};
+
+export type DetectionDebugSnapshot = {
+  contentBounds: Rect;
+  rows: DebugRect[];
+  segments: DebugRect[];
+  columns: DebugRect[];
+  zones: DebugRect[];
+  anchorCandidates: AnchorDebugCandidate[];
+  rejectedAnchorReasons: string[];
+  sectionHeaders: SectionHeader[];
+  warnings: string[];
+  failureReason: string | null;
+};
+
+export type WorksheetAnalysis = {
+  sourceImage: SourceImageMetadata;
+  problemDrafts: ProblemDraft[];
+  sectionHeaders: SectionHeader[];
+  debug: DetectionDebugSnapshot;
+  confidenceSummary: ConfidenceSummary;
+  itemCount: number;
+};
+
+export type WorksheetLayoutPreview = {
+  pageCount: number;
+  worksheetItems: WorksheetItem[];
+  pages: WorksheetPreviewPage[];
+};
+
 export type WorksheetResult = {
   sourceImage: SourceImageMetadata;
   problemRegions: InputProblemRegion[];
@@ -83,5 +171,6 @@ export type WorksheetResult = {
   confidenceSummary: ConfidenceSummary;
   pageCount: number;
   itemCount: number;
+  layoutOptions: WorksheetLayoutOptions;
   pdfUrl: string;
 };

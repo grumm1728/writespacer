@@ -1,71 +1,156 @@
-import { PDFDocument, PDFImage, PDFPage, rgb } from "pdf-lib";
+import { PDFDocument, PDFImage, PDFPage } from "pdf-lib";
 
+import { analyzeWorksheetImage, summarizeConfidence } from "@/lib/detection";
 import type {
   CompositionMode,
-  ConfidenceSummary,
-  InputProblemFragment,
   InputProblemRegion,
+  LayoutDensity,
   LayoutMode,
+  PromptScale,
+  ProblemDraft,
   Rect,
-  SectionHeader,
   SourceImageMetadata,
+  WorksheetAnalysis,
   WorksheetItem,
+  WorksheetLayoutOptions,
+  WorksheetPagePlacement,
+  WorksheetPreviewPage,
+  WorksheetLayoutPreview,
   WorksheetResult,
 } from "@/lib/types";
 
 const MAX_UPLOAD_BYTES = 12 * 1024 * 1024;
 const ACCEPTED_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 
-type ConnectedComponent = Rect & {
-  id: string;
-  area: number;
-  density: number;
-  centerX: number;
-  centerY: number;
+export const DEFAULT_LAYOUT_OPTIONS: WorksheetLayoutOptions = {
+  density: "compact",
+  promptScale: "small",
 };
 
-type TextRow = {
-  id: string;
-  rect: Rect;
-  components: ConnectedComponent[];
-  density: number;
+type WorksheetSource = {
+  canvas: HTMLCanvasElement;
+  grayscale: Uint8Array;
+  imageData: ImageData;
+  metadata: SourceImageMetadata;
 };
 
-type RowSegment = {
-  id: string;
-  rowId: string;
-  rect: Rect;
-  components: ConnectedComponent[];
-};
-
-type AnchorCandidate = {
-  id: string;
-  rect: Rect;
-  row: TextRow;
-  score: number;
-  inferredNumber: number | null;
-};
-
-type OwnershipZone = {
-  anchor: AnchorCandidate;
-  rect: Rect;
-  columnIndex: number;
-  orderIndex: number;
-};
-
-type CropAsset = {
+type CropMetric = {
   regionId: string;
-  bytes: Uint8Array;
   width: number;
   height: number;
   classification: "simple" | "standard" | "complex";
+  sourceLabel: string | null;
   problemNumber: number | null;
   compositionMode: CompositionMode;
+  sectionHeaders: SectionHeaderMetric[];
 };
 
-export async function processWorksheetFile(file: File): Promise<WorksheetResult> {
+type SectionHeaderMetric = {
+  id: string;
+  sourceRect: Rect;
+  width: number;
+  height: number;
+};
+
+type CropAsset = CropMetric & {
+  bytes: Uint8Array;
+  sectionHeaderAssets: SectionHeaderAsset[];
+};
+
+type SectionHeaderAsset = SectionHeaderMetric & {
+  bytes: Uint8Array;
+};
+
+type Placement = ReturnType<typeof measureItem>;
+
+export async function analyzeWorksheetFile(file: File): Promise<WorksheetAnalysis> {
   assertUpload(file);
 
+  const source = await loadWorksheetSource(file);
+  const analysis = analyzeWorksheetImage({
+    grayscale: source.grayscale,
+    height: source.metadata.height,
+    rgba: source.imageData.data,
+    width: source.metadata.width,
+  });
+
+  return {
+    sourceImage: source.metadata,
+    problemDrafts: analysis.problemDrafts,
+    sectionHeaders: analysis.sectionHeaders,
+    debug: analysis.debug,
+    confidenceSummary: summarizeConfidence(analysis.problemDrafts),
+    itemCount: analysis.problemDrafts.filter((draft) => draft.included).length,
+  };
+}
+
+export async function generateWorksheetPdf(
+  file: File,
+  reviewedProblems: ProblemDraft[],
+  layoutOptions: WorksheetLayoutOptions = DEFAULT_LAYOUT_OPTIONS,
+): Promise<WorksheetResult> {
+  assertUpload(file);
+
+  const source = await loadWorksheetSource(file);
+  const problemRegions = toProblemRegions(reviewedProblems.filter((draft) => draft.included));
+
+  if (problemRegions.length === 0) {
+    throw new Error("Include at least one problem region before generating the PDF.");
+  }
+
+  const crops = await buildCropAssets(source.canvas, problemRegions);
+  const pdf = await buildWorksheetPdf(crops, layoutOptions);
+  const pdfBytes = new Uint8Array(pdf.bytes.byteLength);
+  pdfBytes.set(pdf.bytes);
+
+  return {
+    sourceImage: source.metadata,
+    problemRegions,
+    worksheetItems: pdf.items,
+    sectionHeaders: [],
+    confidenceSummary: summarizeConfidence(problemRegions),
+    pageCount: pdf.pageCount,
+    itemCount: problemRegions.length,
+    layoutOptions,
+    pdfUrl: URL.createObjectURL(new Blob([pdfBytes], { type: "application/pdf" })),
+  };
+}
+
+export function previewWorksheetLayout(
+  reviewedProblems: ProblemDraft[],
+  layoutOptions: WorksheetLayoutOptions = DEFAULT_LAYOUT_OPTIONS,
+): WorksheetLayoutPreview {
+  const metrics = toProblemRegions(reviewedProblems.filter((draft) => draft.included)).map(
+    measureProblemCrop,
+  );
+  return measureWorksheetLayout(metrics, layoutOptions);
+}
+
+export async function processWorksheetFile(file: File): Promise<WorksheetResult> {
+  const analysis = await analyzeWorksheetFile(file);
+  return generateWorksheetPdf(file, analysis.problemDrafts, DEFAULT_LAYOUT_OPTIONS);
+}
+
+export function revokeWorksheetResult(result: WorksheetResult) {
+  URL.revokeObjectURL(result.pdfUrl);
+}
+
+export const __testing = {
+  getPromptSourceRects,
+  measureProblemCrop,
+};
+
+function assertUpload(file: File) {
+  if (!ACCEPTED_MIME_TYPES.has(file.type)) {
+    throw new Error("Upload a PNG, JPEG, or WebP image.");
+  }
+
+  if (file.size > MAX_UPLOAD_BYTES) {
+    throw new Error("Keep uploads under 12 MB for this first version.");
+  }
+}
+
+async function loadWorksheetSource(file: File): Promise<WorksheetSource> {
   const bitmap = await createImageBitmap(file);
   const scale = bitmap.width > 1800 ? 1800 / bitmap.width : 1;
   const width = Math.max(1, Math.round(bitmap.width * scale));
@@ -83,76 +168,24 @@ export async function processWorksheetFile(file: File): Promise<WorksheetResult>
   context.fillRect(0, 0, width, height);
   context.drawImage(bitmap, 0, 0, width, height);
 
-  const grayscale = extractGrayscale(context, width, height);
-  const mask = buildDarkMask(grayscale);
-  const contentBounds = detectContentBounds(mask, width, height);
-  const components = detectConnectedComponents(mask, width, height, contentBounds);
-  const textRows = buildTextRows(components, contentBounds, width, height);
-  const rowSegments = buildRowSegments(textRows, width, height);
-  const anchors = detectAnchorCandidates(textRows, rowSegments, contentBounds);
-  const sectionHeaders = detectSectionHeaders(textRows, anchors, contentBounds, width, height);
-  const zones = buildOwnershipZones(anchors, contentBounds, width, height);
-  const effectiveZones =
-    zones.length > 0
-      ? zones
-      : buildFallbackZonesFromRows(textRows, rowSegments, contentBounds, width, height);
-  const problemRegions = buildProblemRegions(
-    components,
-    rowSegments,
-    sectionHeaders,
-    effectiveZones,
-    width,
-    height,
-  );
-  if (problemRegions.length === 0) {
-    throw new Error(
-      "No problem regions were detected. Try the debug overlay to inspect anchors, or use a tighter crop of the worksheet page.",
-    );
-  }
-  const crops = await buildCropAssets(canvas, problemRegions);
-  const pdf = await buildWorksheetPdf(crops);
-
-  const pdfBytes = new Uint8Array(pdf.bytes.byteLength);
-  pdfBytes.set(pdf.bytes);
+  const imageData = context.getImageData(0, 0, width, height);
+  const grayscale = extractGrayscale(imageData);
 
   return {
-    sourceImage: {
+    canvas,
+    grayscale,
+    imageData,
+    metadata: {
       width,
       height,
       mimeType: file.type,
       sizeBytes: file.size,
-    } satisfies SourceImageMetadata,
-    problemRegions,
-    worksheetItems: pdf.items,
-    sectionHeaders,
-    confidenceSummary: summarizeConfidence(problemRegions),
-    pageCount: pdf.pageCount,
-    itemCount: problemRegions.length,
-    pdfUrl: URL.createObjectURL(new Blob([pdfBytes], { type: "application/pdf" })),
+    },
   };
 }
 
-export function revokeWorksheetResult(result: WorksheetResult) {
-  URL.revokeObjectURL(result.pdfUrl);
-}
-
-function assertUpload(file: File) {
-  if (!ACCEPTED_MIME_TYPES.has(file.type)) {
-    throw new Error("Upload a PNG, JPEG, or WebP image.");
-  }
-
-  if (file.size > MAX_UPLOAD_BYTES) {
-    throw new Error("Keep uploads under 12 MB for this first version.");
-  }
-}
-
-function extractGrayscale(
-  context: CanvasRenderingContext2D,
-  width: number,
-  height: number,
-) {
-  const imageData = context.getImageData(0, 0, width, height);
-  const grayscale = new Uint8Array(width * height);
+function extractGrayscale(imageData: ImageData) {
+  const grayscale = new Uint8Array(imageData.width * imageData.height);
 
   for (let offset = 0, pixel = 0; offset < imageData.data.length; offset += 4, pixel += 1) {
     const red = imageData.data[offset];
@@ -164,877 +197,14 @@ function extractGrayscale(
   return grayscale;
 }
 
-function buildDarkMask(grayscale: Uint8Array) {
-  const mask = new Uint8Array(grayscale.length);
-  for (let index = 0; index < grayscale.length; index += 1) {
-    mask[index] = grayscale[index] < 205 ? 1 : 0;
-  }
-  return mask;
-}
-
-function detectContentBounds(mask: Uint8Array, width: number, height: number): Rect {
-  const rows = new Array<number>(height).fill(0);
-  const cols = new Array<number>(width).fill(0);
-
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const dark = mask[y * width + x];
-      rows[y] += dark;
-      cols[x] += dark;
-    }
-  }
-
-  const minRow = Math.max(3, Math.floor(width * 0.004));
-  const minCol = Math.max(3, Math.floor(height * 0.012));
-  const top = rows.findIndex((value) => value >= minRow);
-  const bottom = findLastIndex(rows, (value) => value >= minRow);
-  const left = cols.findIndex((value) => value >= minCol);
-  const right = findLastIndex(cols, (value) => value >= minCol);
-
-  if (top < 0 || left < 0 || right <= left || bottom <= top) {
-    return { left: 0, top: 0, width, height };
-  }
-
-  return padRect(
-    { left, top, width: right - left + 1, height: bottom - top + 1 },
-    width,
-    height,
-    18,
-  );
-}
-
-function detectConnectedComponents(
-  mask: Uint8Array,
-  width: number,
-  height: number,
-  bounds: Rect,
-) {
-  const visited = new Uint8Array(width * height);
-  const components: ConnectedComponent[] = [];
-  let nextId = 1;
-
-  const left = Math.round(bounds.left);
-  const right = Math.min(width, Math.round(bounds.left + bounds.width));
-  const top = Math.round(bounds.top);
-  const bottom = Math.min(height, Math.round(bounds.top + bounds.height));
-
-  for (let y = top; y < bottom; y += 1) {
-    for (let x = left; x < right; x += 1) {
-      const offset = y * width + x;
-      if (!mask[offset] || visited[offset]) {
-        continue;
-      }
-
-      const component = floodFill(mask, visited, width, height, x, y);
-      if (component.area < 12 || component.width < 2 || component.height < 2) {
-        continue;
-      }
-
-      components.push({
-        id: `component-${nextId}`,
-        left: component.left,
-        top: component.top,
-        width: component.width,
-        height: component.height,
-        area: component.area,
-        density: component.area / Math.max(1, component.width * component.height),
-        centerX: component.left + component.width / 2,
-        centerY: component.top + component.height / 2,
-      });
-
-      nextId += 1;
-    }
-  }
-
-  return components;
-}
-
-function buildTextRows(
-  components: ConnectedComponent[],
-  contentBounds: Rect,
-  width: number,
-  height: number,
-) {
-  const sorted = [...components].sort((left, right) => left.top - right.top);
-  const rows: TextRow[] = [];
-  const rowGap = Math.max(10, Math.round(contentBounds.height * 0.006));
-  let nextId = 1;
-
-  for (const component of sorted) {
-    const current = rows.at(-1);
-    if (!current) {
-      rows.push(makeRow(nextId++, component));
-      continue;
-    }
-
-    const rowBottom = current.rect.top + current.rect.height;
-    const verticalGap = component.top - rowBottom;
-    const overlapsVertically = component.top <= rowBottom;
-
-    if (overlapsVertically || verticalGap <= rowGap) {
-      current.components.push(component);
-      current.rect = padRect(unionRects([current.rect, component]), width, height, 2);
-      current.density =
-        current.components.reduce((sum, item) => sum + item.density, 0) /
-        current.components.length;
-    } else {
-      rows.push(makeRow(nextId++, component));
-    }
-  }
-
-  return rows.filter((row) => row.rect.width > Math.max(26, contentBounds.width * 0.04));
-}
-
-function makeRow(id: number, component: ConnectedComponent): TextRow {
-  return {
-    id: `row-${id}`,
-    rect: {
-      left: component.left,
-      top: component.top,
-      width: component.width,
-      height: component.height,
-    },
-    components: [component],
-    density: component.density,
-  };
-}
-
-function buildRowSegments(rows: TextRow[], width: number, height: number) {
-  const segments: RowSegment[] = [];
-
-  for (const row of rows) {
-    const sorted = [...row.components].sort((left, right) => left.left - right.left);
-    let group: ConnectedComponent[] = [];
-    const splitGap = Math.max(8, row.rect.height * 0.32);
-
-    for (const component of sorted) {
-      const previous = group.at(-1);
-      if (!previous) {
-        group = [component];
-        continue;
-      }
-
-      const gap = component.left - (previous.left + previous.width);
-      if (gap > splitGap) {
-        segments.push(makeSegment(row.id, segments.length + 1, group, width, height));
-        group = [component];
-      } else {
-        group.push(component);
-      }
-    }
-
-    if (group.length > 0) {
-      segments.push(makeSegment(row.id, segments.length + 1, group, width, height));
-    }
-  }
-
-  return segments;
-}
-
-function makeSegment(
-  rowId: string,
-  id: number,
-  components: ConnectedComponent[],
-  width: number,
-  height: number,
-): RowSegment {
-  return {
-    id: `segment-${id}`,
-    rowId,
-    rect: padRect(
-      unionRects(
-        components.map((component) => ({
-          left: component.left,
-          top: component.top,
-          width: component.width,
-          height: component.height,
-        })),
-      ),
-      width,
-      height,
-      3,
-    ),
-    components,
-  };
-}
-
-function detectAnchorCandidates(
-  rows: TextRow[],
-  rowSegments: RowSegment[],
-  contentBounds: Rect,
-) {
-  const primaryAnchors: AnchorCandidate[] = [];
-
-  for (const row of rows) {
-    const segments = rowSegments
-      .filter((segment) => segment.rowId === row.id)
-      .sort((left, right) => left.rect.left - right.rect.left);
-
-    if (segments.length < 2) {
-      continue;
-    }
-
-    for (let index = 0; index < segments.length - 1; index += 1) {
-      const segment = segments[index];
-      const next = segments[index + 1];
-      const segmentDensity =
-        segment.components.reduce((sum, item) => sum + item.density, 0) / segment.components.length;
-      const gapToNext = next.rect.left - (segment.rect.left + segment.rect.width);
-      const likelyAnchor =
-        segment.rect.width < Math.min(84, row.rect.width * 0.18) &&
-        segment.rect.height <= row.rect.height * 1.4 &&
-        next.rect.width > segment.rect.width * 1.05 &&
-        gapToNext > Math.max(4, row.rect.height * 0.08);
-
-      if (!likelyAnchor) {
-        continue;
-      }
-
-      const score =
-        (segment.rect.width < Math.min(64, row.rect.width * 0.16) ? 0.24 : 0.12) +
-        (segmentDensity > 0.22 ? 0.18 : 0.08) +
-        (next.rect.width > segment.rect.width * 1.6 ? 0.16 : 0.08) +
-        (gapToNext > row.rect.height * 0.12 ? 0.12 : 0.08) +
-        (segment.rect.left < contentBounds.left + contentBounds.width * 0.62 ? 0.1 : 0.05) +
-        (segment.components.length <= 5 ? 0.12 : 0.04);
-
-      if (score < 0.58) {
-        continue;
-      }
-
-      primaryAnchors.push({
-        id: `anchor-${primaryAnchors.length + 1}`,
-        rect: segment.rect,
-        row,
-        score,
-        inferredNumber: primaryAnchors.length + 1,
-      });
-    }
-  }
-
-  const relaxedAnchors =
-    primaryAnchors.length >= 4
-      ? primaryAnchors
-      : synthesizeFallbackAnchors(rows, rowSegments, contentBounds, primaryAnchors);
-  const withRowStarts =
-    relaxedAnchors.length >= 4
-      ? relaxedAnchors
-      : synthesizeRowStartAnchors(rows, rowSegments, contentBounds, relaxedAnchors);
-
-  return dedupeAnchors(withRowStarts)
-    .sort(compareReadingOrder)
-    .map((anchor, index) => ({ ...anchor, inferredNumber: index + 1 }));
-}
-
-function synthesizeFallbackAnchors(
-  rows: TextRow[],
-  rowSegments: RowSegment[],
-  contentBounds: Rect,
-  existingAnchors: AnchorCandidate[],
-) {
-  const anchors = [...existingAnchors];
-  const leftCutoff = contentBounds.left + Math.min(contentBounds.width * 0.2, 160);
-
-  for (const row of rows) {
-    const segments = rowSegments
-      .filter((segment) => segment.rowId === row.id)
-      .sort((left, right) => left.rect.left - right.rect.left);
-
-    if (segments.length === 0) {
-      continue;
-    }
-
-    const first = segments[0];
-    const second = segments[1];
-    const firstDensity =
-      first.components.reduce((sum, item) => sum + item.density, 0) / first.components.length;
-    const gapToSecond = second
-      ? second.rect.left - (first.rect.left + first.rect.width)
-      : 0;
-    const startsLikeProblem =
-      first.rect.left < leftCutoff &&
-      first.rect.width < Math.min(110, row.rect.width * 0.24) &&
-      first.rect.height <= row.rect.height * 1.6 &&
-      (Boolean(second) || row.rect.width > first.rect.width * 2.2);
-
-    if (!startsLikeProblem) {
-      continue;
-    }
-
-    const overlapsExisting = anchors.some((anchor) =>
-      intersects(
-        padRect(anchor.rect, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, 6),
-        first.rect,
-      ),
-    );
-
-    if (overlapsExisting) {
-      continue;
-    }
-
-    const score =
-      0.34 +
-      (firstDensity > 0.2 ? 0.12 : 0.05) +
-      (second ? 0.16 : 0.1) +
-      (gapToSecond > Math.max(4, row.rect.height * 0.08) ? 0.12 : 0.05) +
-      (row.rect.width > first.rect.width * 2 ? 0.12 : 0.06);
-
-    anchors.push({
-      id: `anchor-${anchors.length + 1}`,
-      rect: first.rect,
-      row,
-      score,
-      inferredNumber: anchors.length + 1,
-    });
-  }
-
-  return anchors;
-}
-
-function synthesizeRowStartAnchors(
-  rows: TextRow[],
-  rowSegments: RowSegment[],
-  contentBounds: Rect,
-  existingAnchors: AnchorCandidate[],
-) {
-  const anchors = [...existingAnchors];
-  const leftMargin = contentBounds.left + Math.min(120, contentBounds.width * 0.12);
-  const sortedRows = [...rows].sort((left, right) => left.rect.top - right.rect.top);
-
-  for (const row of sortedRows) {
-    const rowHasAnchor = anchors.some((anchor) =>
-      intersects(
-        padRect(anchor.row.rect, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, 4),
-        row.rect,
-      ),
-    );
-    if (rowHasAnchor) {
-      continue;
-    }
-
-    const segments = rowSegments
-      .filter((segment) => segment.rowId === row.id)
-      .sort((left, right) => left.rect.left - right.rect.left);
-    if (segments.length === 0) {
-      continue;
-    }
-
-    const first = segments[0];
-    const second = segments[1] ?? null;
-    const rowLooksLikeHeader =
-      row.rect.width > contentBounds.width * 0.34 &&
-      row.rect.height > 18 &&
-      first.rect.left < leftMargin;
-
-    if (rowLooksLikeHeader) {
-      continue;
-    }
-
-    const startsNearMargin = first.rect.left <= leftMargin;
-    const substantialRow = row.rect.width > Math.max(120, contentBounds.width * 0.16);
-    const hasSeparatedContent =
-      second !== null &&
-      second.rect.left - (first.rect.left + first.rect.width) >
-        Math.max(4, row.rect.height * 0.08);
-    const firstIsCompact =
-      first.rect.width < Math.min(120, Math.max(36, row.rect.width * 0.24));
-
-    if (!startsNearMargin || !substantialRow || (!firstIsCompact && !hasSeparatedContent)) {
-      continue;
-    }
-
-    const score =
-      0.36 +
-      (firstIsCompact ? 0.16 : 0.08) +
-      (hasSeparatedContent ? 0.16 : 0.06) +
-      (row.rect.width > first.rect.width * 2.2 ? 0.12 : 0.04);
-
-    anchors.push({
-      id: `anchor-${anchors.length + 1}`,
-      rect: first.rect,
-      row,
-      score,
-      inferredNumber: anchors.length + 1,
-    });
-  }
-
-  return anchors;
-}
-
-function dedupeAnchors(anchors: AnchorCandidate[]) {
-  const sorted = [...anchors].sort((left, right) => right.score - left.score);
-  const kept: AnchorCandidate[] = [];
-
-  for (const anchor of sorted) {
-    const overlapsExisting = kept.some((candidate) =>
-      intersects(padRect(candidate.rect, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, 6), anchor.rect),
-    );
-    if (!overlapsExisting) {
-      kept.push(anchor);
-    }
-  }
-
-  return kept;
-}
-
-function compareReadingOrder(left: { rect: Rect }, right: { rect: Rect }) {
-  const sameRow =
-    Math.abs(left.rect.top - right.rect.top) <
-    Math.max(left.rect.height, right.rect.height) * 0.65;
-  if (sameRow) {
-    return left.rect.left - right.rect.left;
-  }
-
-  return left.rect.top - right.rect.top;
-}
-
-function detectSectionHeaders(
-  rows: TextRow[],
-  anchors: AnchorCandidate[],
-  contentBounds: Rect,
-  width: number,
-  height: number,
-) {
-  const headers: SectionHeader[] = [];
-
-  for (const row of rows) {
-    const isAnchorRow = anchors.some((anchor) => intersects(anchor.row.rect, row.rect));
-    if (isAnchorRow) {
-      continue;
-    }
-
-    const likelyHeader =
-      row.rect.width > contentBounds.width * 0.35 &&
-      row.rect.height > 18 &&
-      row.rect.left < contentBounds.left + contentBounds.width * 0.18;
-
-    if (!likelyHeader) {
-      continue;
-    }
-
-    const nearbyAnchors = anchors.filter(
-      (anchor) => anchor.rect.top > row.rect.top && anchor.rect.top - row.rect.top < 180,
-    );
-    if (nearbyAnchors.length === 0) {
-      continue;
-    }
-
-    headers.push({
-      id: `section-${headers.length + 1}`,
-      rects: [padRect(row.rect, width, height, 6)],
-      unionBounds: padRect(row.rect, width, height, 8),
-      confidence: 0.72,
-    });
-  }
-
-  return headers;
-}
-
-function buildOwnershipZones(
-  anchors: AnchorCandidate[],
-  contentBounds: Rect,
-  width: number,
-  height: number,
-) {
-  if (anchors.length === 0) {
-    return [];
-  }
-
-  const columnSplit = estimateColumnSplit(anchors, contentBounds);
-  const columns = partitionAnchorsByColumn(anchors, columnSplit);
-  const zones: OwnershipZone[] = [];
-
-  columns.forEach((columnAnchors, columnIndex) => {
-    const sorted = [...columnAnchors].sort((left, right) => left.rect.top - right.rect.top);
-    const columnLeft = columnIndex === 0 ? contentBounds.left : columnSplit;
-    const columnRight =
-      columnIndex === columns.length - 1 ? contentBounds.left + contentBounds.width : columnSplit;
-
-    for (let index = 0; index < sorted.length; index += 1) {
-      const anchor = sorted[index];
-      const previous = sorted[index - 1];
-      const next = sorted[index + 1];
-      const top = previous
-        ? Math.round((previous.rect.top + previous.rect.height + anchor.rect.top) / 2)
-        : Math.max(0, Math.round(anchor.rect.top - Math.min(80, anchor.rect.height * 2.4)));
-      const bottom = next
-        ? Math.round((anchor.rect.top + anchor.rect.height + next.rect.top) / 2)
-        : Math.min(height, Math.round(anchor.rect.top + Math.max(150, contentBounds.height * 0.12)));
-
-      zones.push({
-        anchor,
-        columnIndex,
-        orderIndex: zones.length,
-        rect: padRect(
-          {
-            left: columnLeft,
-            top,
-            width: Math.max(1, columnRight - columnLeft),
-            height: Math.max(1, bottom - top),
-          },
-          width,
-          height,
-          8,
-        ),
-      });
-    }
-  });
-
-  return zones.sort(
-    (left, right) => (left.anchor.inferredNumber ?? left.orderIndex) - (right.anchor.inferredNumber ?? right.orderIndex),
-  );
-}
-
-function buildFallbackZonesFromRows(
-  rows: TextRow[],
-  rowSegments: RowSegment[],
-  contentBounds: Rect,
-  width: number,
-  height: number,
-) {
-  const syntheticAnchors: AnchorCandidate[] = [];
-  const leftMargin = contentBounds.left + Math.min(120, contentBounds.width * 0.12);
-  const estimatedSplit = contentBounds.left + contentBounds.width / 2;
-  const rightMarginBand = estimatedSplit - Math.min(70, contentBounds.width * 0.08);
-
-  for (const row of [...rows].sort((left, right) => left.rect.top - right.rect.top)) {
-    const segments = rowSegments
-      .filter((segment) => segment.rowId === row.id)
-      .sort((left, right) => left.rect.left - right.rect.left);
-    if (segments.length === 0) {
-      continue;
-    }
-
-    const first = segments[0];
-    const rowLooksLikeHeader =
-      row.rect.width > contentBounds.width * 0.34 &&
-      row.rect.height > 18 &&
-      first.rect.left < leftMargin;
-
-    if (rowLooksLikeHeader) {
-      continue;
-    }
-
-    for (let index = 0; index < segments.length; index += 1) {
-      const segment = segments[index];
-      const previous = segments[index - 1] ?? null;
-      const next = segments[index + 1] ?? null;
-      const startsNearLeft = segment.rect.left <= leftMargin;
-      const startsNearRight = segment.rect.left >= rightMarginBand;
-      const gapBefore = previous
-        ? segment.rect.left - (previous.rect.left + previous.rect.width)
-        : Number.POSITIVE_INFINITY;
-      const gapAfter = next
-        ? next.rect.left - (segment.rect.left + segment.rect.width)
-        : 0;
-      const compactLead =
-        segment.rect.width < Math.min(115, Math.max(34, row.rect.width * 0.26));
-      const rowHasSubstantialContent =
-        row.rect.width > Math.max(120, contentBounds.width * 0.15);
-      const likelyProblemStart =
-        rowHasSubstantialContent &&
-        (startsNearLeft ||
-          startsNearRight ||
-          gapBefore > Math.max(18, row.rect.height * 0.45)) &&
-        (compactLead ||
-          gapAfter > Math.max(8, row.rect.height * 0.12) ||
-          (next !== null && next.rect.width > segment.rect.width * 1.15));
-
-      if (!likelyProblemStart) {
-        continue;
-      }
-
-      const overlapsExisting = syntheticAnchors.some((anchor) =>
-        intersects(
-          padRect(anchor.rect, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, 6),
-          segment.rect,
-        ),
-      );
-      if (overlapsExisting) {
-        continue;
-      }
-
-      const score =
-        0.34 +
-        (compactLead ? 0.16 : 0.08) +
-        (startsNearLeft || startsNearRight ? 0.14 : 0.06) +
-        (gapAfter > Math.max(8, row.rect.height * 0.12) ? 0.12 : 0.05) +
-        (next !== null ? 0.08 : 0.03);
-
-      syntheticAnchors.push({
-        id: `fallback-anchor-${syntheticAnchors.length + 1}`,
-        rect: segment.rect,
-        row,
-        score,
-        inferredNumber: null,
-      });
-    }
-  }
-
-  const deduped = dedupeAnchors(syntheticAnchors)
-    .sort(compareReadingOrder)
-    .map((anchor, index) => ({ ...anchor, inferredNumber: index + 1 }));
-
-  return buildOwnershipZones(deduped, contentBounds, width, height);
-}
-
-function estimateColumnSplit(anchors: AnchorCandidate[], contentBounds: Rect) {
-  const centers = anchors
-    .map((anchor) => anchor.rect.left + anchor.rect.width / 2)
-    .sort((left, right) => left - right);
-  if (centers.length < 4) {
-    return contentBounds.left + contentBounds.width / 2;
-  }
-
-  let widestGap = 0;
-  let split = contentBounds.left + contentBounds.width / 2;
-  for (let index = 1; index < centers.length; index += 1) {
-    const gap = centers[index] - centers[index - 1];
-    if (gap > widestGap) {
-      widestGap = gap;
-      split = centers[index - 1] + gap / 2;
-    }
-  }
-
-  if (widestGap < contentBounds.width * 0.12) {
-    return contentBounds.left + contentBounds.width / 2;
-  }
-
-  return split;
-}
-
-function partitionAnchorsByColumn(anchors: AnchorCandidate[], split: number) {
-  const left = anchors.filter((anchor) => anchor.rect.left + anchor.rect.width / 2 < split);
-  const right = anchors.filter((anchor) => anchor.rect.left + anchor.rect.width / 2 >= split);
-
-  if (left.length === 0 || right.length === 0) {
-    return [anchors];
-  }
-
-  return [left, right];
-}
-
-function buildProblemRegions(
-  components: ConnectedComponent[],
-  rowSegments: RowSegment[],
-  sectionHeaders: SectionHeader[],
-  zones: OwnershipZone[],
-  width: number,
-  height: number,
-) {
-  if (zones.length === 0) {
-    return [];
-  }
-
-  return zones.map((zone, index) => {
-    const componentsInZone = components.filter((component) =>
-      rectContains(zone.rect, component.centerX, component.centerY),
-    );
-    const segmentsInZone = rowSegments.filter((segment) =>
-      rectContains(
-        zone.rect,
-        segment.rect.left + segment.rect.width / 2,
-        segment.rect.top + segment.rect.height / 2,
-      ),
-    );
-    const attachedHeader = sectionHeaders.find((header) => {
-      if (index > 0) {
-        const previous = zones[index - 1];
-        if (
-          header.unionBounds.top > previous.anchor.rect.top &&
-          header.unionBounds.top < zone.anchor.rect.top
-        ) {
-          return false;
-        }
-      }
-
-      return (
-        header.unionBounds.top < zone.anchor.rect.top &&
-        zone.anchor.rect.top - header.unionBounds.top < 180
-      );
-    });
-
-    const contentRects = buildAssignedContentRects(
-      segmentsInZone,
-      zone.anchor.rect,
-      componentsInZone,
-      width,
-      height,
-    );
-    const sectionHeaderRects = attachedHeader ? attachedHeader.rects : [];
-    const anchorRect = padRect(zone.anchor.rect, width, height, 6);
-    const allRects = [...sectionHeaderRects, anchorRect, ...contentRects];
-    const unionBounds = padRect(unionRects(allRects), width, height, 10);
-    const hasDiagram = componentsInZone.some(
-      (component) =>
-        component.width > Math.max(55, zone.rect.width * 0.18) &&
-        component.height > Math.max(55, zone.rect.height * 0.12),
-    );
-    const compositionMode = chooseCompositionMode(contentRects, unionBounds, zone.rect);
-    const fragments: InputProblemFragment[] = [
-      {
-        id: `${zone.anchor.id}-anchor`,
-        kind: "anchor",
-        rect: anchorRect,
-        confidence: zone.anchor.score,
-      },
-      ...sectionHeaderRects.map((rect, headerIndex) => ({
-        id: `${zone.anchor.id}-header-${headerIndex + 1}`,
-        kind: "section-header" as const,
-        rect,
-        confidence: attachedHeader?.confidence ?? 0.6,
-      })),
-      ...contentRects.map((rect, rectIndex) => ({
-        id: `${zone.anchor.id}-${hasDiagram && rect.height > unionBounds.height * 0.28 ? "diagram" : "content"}-${rectIndex + 1}`,
-        kind:
-          hasDiagram && rect.height > unionBounds.height * 0.28
-            ? ("diagram" as const)
-            : ("content" as const),
-        rect,
-        confidence: 0.72,
-      })),
-    ];
-
-    return {
-      id: `problem-${index + 1}`,
-      problemNumber: zone.anchor.inferredNumber,
+function toProblemRegions(problemDrafts: ProblemDraft[]): InputProblemRegion[] {
+  return problemDrafts
+    .map((draft, index) => ({
+      ...draft,
       orderIndex: index,
-      anchorRect,
-      contentRects,
-      sectionHeaderRects,
-      unionBounds,
-      confidence: calculateProblemConfidence(zone, contentRects, hasDiagram),
-      fragments,
-      compositionMode,
-      columnHint: zone.columnIndex,
-    } satisfies InputProblemRegion;
-  });
-}
-
-function buildAssignedContentRects(
-  segmentsInZone: RowSegment[],
-  anchorRect: Rect,
-  componentsInZone: ConnectedComponent[],
-  width: number,
-  height: number,
-) {
-  const filteredSegments = segmentsInZone
-    .filter(
-      (segment) =>
-        segment.rect.top >= anchorRect.top - 8 &&
-        !intersects(
-          padRect(anchorRect, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, 4),
-          segment.rect,
-        ),
-    )
-    .sort((left, right) => compareReadingOrder({ rect: left.rect }, { rect: right.rect }));
-  const rects = mergeSegmentsByRow(filteredSegments, width, height);
-
-  const diagramRects = mergeDiagramRects(
-    componentsInZone.filter(
-      (component) =>
-        component.width > 48 &&
-        component.height > 48 &&
-        !rects.some((rect) => intersects(rect, component)),
-    ),
-    width,
-    height,
-  );
-
-  const combined = [...rects, ...diagramRects].sort((left, right) =>
-    compareReadingOrder({ rect: left }, { rect: right }),
-  );
-
-  return combined.length > 0 ? combined : [padRect(anchorRect, width, height, 8)];
-}
-
-function mergeSegmentsByRow(segments: RowSegment[], width: number, height: number) {
-  const byRow = new Map<string, RowSegment[]>();
-
-  for (const segment of segments) {
-    const rowSegments = byRow.get(segment.rowId) ?? [];
-    rowSegments.push(segment);
-    byRow.set(segment.rowId, rowSegments);
-  }
-
-  const merged: Rect[] = [];
-
-  for (const rowSegments of byRow.values()) {
-    const sorted = [...rowSegments].sort((left, right) => left.rect.left - right.rect.left);
-    let current: Rect | null = null;
-
-    for (const segment of sorted) {
-      const rect = padRect(segment.rect, width, height, 4);
-      if (!current) {
-        current = rect;
-        continue;
-      }
-
-      const gap = rect.left - (current.left + current.width);
-      if (gap <= Math.max(18, current.height * 0.9)) {
-        current = padRect(unionRects([current, rect]), width, height, 2);
-      } else {
-        merged.push(current);
-        current = rect;
-      }
-    }
-
-    if (current) {
-      merged.push(current);
-    }
-  }
-
-  return merged.sort((left, right) => compareReadingOrder({ rect: left }, { rect: right }));
-}
-
-function mergeDiagramRects(
-  components: ConnectedComponent[],
-  width: number,
-  height: number,
-) {
-  const merged: Rect[] = [];
-
-  for (const component of components) {
-    const rect = padRect(component, width, height, 6);
-    const existingIndex = merged.findIndex((candidate) =>
-      intersects(
-        padRect(candidate, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, 10),
-        rect,
-      ),
-    );
-
-    if (existingIndex >= 0) {
-      merged[existingIndex] = padRect(
-        unionRects([merged[existingIndex], rect]),
-        width,
-        height,
-        4,
-      );
-    } else {
-      merged.push(rect);
-    }
-  }
-
-  return merged;
-}
-
-function chooseCompositionMode(contentRects: Rect[], unionBounds: Rect, zoneRect: Rect): CompositionMode {
-  if (contentRects.length > 8 || unionBounds.height > zoneRect.height * 0.92) {
-    return "union-fallback";
-  }
-
-  return "composite-stack";
-}
-
-function calculateProblemConfidence(
-  zone: OwnershipZone,
-  contentRects: Rect[],
-  hasDiagram: boolean,
-) {
-  const base = 0.45 + Math.min(0.22, zone.anchor.score * 0.22);
-  const contentScore = Math.min(0.18, contentRects.length * 0.03);
-  const complexityPenalty = hasDiagram ? 0.04 : 0;
-  return clamp(base + contentScore - complexityPenalty, 0.28, 0.96);
+      problemNumber: null,
+    }))
+    .sort((left, right) => left.orderIndex - right.orderIndex);
 }
 
 async function buildCropAssets(
@@ -1043,34 +213,90 @@ async function buildCropAssets(
 ) {
   return Promise.all(
     problemRegions.map(async (region) => {
-      const classification = classifyProblem(region);
-      const renderedCanvas =
-        region.compositionMode === "union-fallback"
-          ? cropUnionRegion(sourceCanvas, region.unionBounds)
-          : composeRegionStack(sourceCanvas, region);
+      const metric = measureProblemCrop(region);
+      const renderedCanvas = composeProblemPrompt(sourceCanvas, region);
       const blob = await canvasToBlob(renderedCanvas);
       const bytes = new Uint8Array(await blob.arrayBuffer());
+      const sectionHeaderAssets = await Promise.all(
+        metric.sectionHeaders.map(async (header) => {
+          const headerCanvas = cropUnionRegion(sourceCanvas, header.sourceRect);
+          const headerBlob = await canvasToBlob(headerCanvas);
+          return {
+            ...header,
+            bytes: new Uint8Array(await headerBlob.arrayBuffer()),
+            width: headerCanvas.width,
+            height: headerCanvas.height,
+          } satisfies SectionHeaderAsset;
+        }),
+      );
 
       return {
-        regionId: region.id,
+        ...metric,
         bytes,
         width: renderedCanvas.width,
         height: renderedCanvas.height,
-        classification,
-        problemNumber: region.problemNumber,
-        compositionMode: region.compositionMode,
+        sectionHeaderAssets,
       } satisfies CropAsset;
     }),
   );
 }
 
+function measureProblemCrop(region: InputProblemRegion): CropMetric {
+  const classification = classifyProblem(region);
+  const sectionHeaders = measureSectionHeaders(region);
+
+  if (region.compositionMode === "union-fallback") {
+    return {
+      regionId: region.id,
+      width: Math.max(1, Math.round(region.unionBounds.width)),
+      height: Math.max(1, Math.round(region.unionBounds.height)),
+      classification,
+      sourceLabel: region.sourceLabel,
+      problemNumber: region.problemNumber,
+      compositionMode: region.compositionMode,
+      sectionHeaders,
+    };
+  }
+
+  const rects = getPromptSourceRects(region);
+  const gap = 8;
+  const width = Math.max(1, Math.round(Math.max(...rects.map((rect) => rect.width))));
+  const height = Math.max(
+    1,
+    Math.round(
+      rects.reduce((sum, rect) => sum + rect.height, 0) +
+        Math.max(0, rects.length - 1) * gap,
+    ),
+  );
+
+  return {
+    regionId: region.id,
+    width,
+    height,
+    classification,
+    sourceLabel: region.sourceLabel,
+    problemNumber: region.problemNumber,
+    compositionMode: region.compositionMode,
+    sectionHeaders,
+  };
+}
+
+function measureSectionHeaders(region: InputProblemRegion): SectionHeaderMetric[] {
+  return region.sectionHeaderRects.map((sourceRect, index) => ({
+    id: `${region.id}-section-header-${index + 1}`,
+    sourceRect,
+    width: Math.max(1, Math.round(sourceRect.width)),
+    height: Math.max(1, Math.round(sourceRect.height)),
+  }));
+}
+
 function classifyProblem(region: InputProblemRegion) {
   const diagramLike = region.fragments.some((fragment) => fragment.kind === "diagram");
-  if (diagramLike || region.unionBounds.height > 260 || region.contentRects.length > 5) {
+  if (diagramLike || region.unionBounds.height > 250 || region.contentRects.length > 6) {
     return "complex" as const;
   }
 
-  if (region.unionBounds.height < 88 && region.contentRects.length <= 2) {
+  if (region.unionBounds.height < 92 && region.contentRects.length <= 3) {
     return "simple" as const;
   }
 
@@ -1104,12 +330,12 @@ function cropUnionRegion(sourceCanvas: HTMLCanvasElement, bounds: Rect) {
   return canvas;
 }
 
-function composeRegionStack(sourceCanvas: HTMLCanvasElement, region: InputProblemRegion) {
-  const rects = [
-    ...region.sectionHeaderRects.map((rect) => ({ rect })),
-    { rect: region.anchorRect },
-    ...region.contentRects.map((rect) => ({ rect })),
-  ];
+function composeProblemPrompt(sourceCanvas: HTMLCanvasElement, region: InputProblemRegion) {
+  if (region.compositionMode === "union-fallback") {
+    return cropUnionRegion(sourceCanvas, region.unionBounds);
+  }
+
+  const rects = getPromptSourceRects(region).map((rect) => ({ rect }));
   const gap = 8;
   const width = Math.max(...rects.map((item) => item.rect.width));
   const height =
@@ -1146,32 +372,107 @@ function composeRegionStack(sourceCanvas: HTMLCanvasElement, region: InputProble
   return canvas;
 }
 
-async function buildWorksheetPdf(crops: CropAsset[]) {
+function getPromptSourceRects(
+  region: Pick<InputProblemRegion, "anchorRect" | "compositionMode" | "contentRects" | "unionBounds">,
+) {
+  if (region.compositionMode === "union-fallback") {
+    return [region.unionBounds];
+  }
+
+  const firstContent = region.contentRects[0] ?? null;
+  if (!firstContent) {
+    return [region.anchorRect];
+  }
+
+  return [unionRects([region.anchorRect, firstContent]), ...region.contentRects.slice(1)];
+}
+
+async function buildWorksheetPdf(crops: CropAsset[], layoutOptions: WorksheetLayoutOptions) {
   const pdf = await PDFDocument.create();
+  const layout = measureWorksheetLayout(crops, layoutOptions);
   const pageWidth = 612;
   const pageHeight = 792;
   const margin = 36;
-  const gutter = 18;
+  const pages: PDFPage[] = layout.pages.map(() => pdf.addPage([pageWidth, pageHeight]));
+
+  for (const previewPage of layout.pages) {
+    const page = pages[previewPage.pageIndex];
+
+    for (const placement of previewPage.placements) {
+      if (placement.type === "section-header") {
+        const crop = crops.find((candidate) => candidate.regionId === placement.regionId);
+        const header = crop?.sectionHeaderAssets.find(
+          (candidate) => candidate.id === placement.id,
+        );
+        if (!header) {
+          continue;
+        }
+
+        const image = await pdf.embedPng(header.bytes);
+        drawImageRect(page, image, placement.rect, pageHeight);
+        continue;
+      }
+
+      const crop = crops.find((candidate) => candidate.regionId === placement.regionId);
+      if (!crop) {
+        continue;
+      }
+
+      const image = await pdf.embedPng(crop.bytes);
+      drawImageRect(page, image, placement.prompt, pageHeight);
+      // The answer area is intentionally left blank. Teachers can print over
+      // graph/grid paper, and the whitespace alone keeps photocopies clean.
+    }
+  }
+
+  return {
+    bytes: await pdf.save(),
+    pageCount: Math.max(1, layout.pageCount),
+    items: layout.worksheetItems,
+    margin,
+  };
+}
+
+function measureWorksheetLayout(
+  crops: CropMetric[],
+  layoutOptions: WorksheetLayoutOptions,
+): WorksheetLayoutPreview {
+  const pageWidth = 612;
+  const pageHeight = 792;
+  const margin = 36;
+  const gutter = layoutOptions.density === "compact" ? 14 : 18;
+  const rowGap = densityValue(layoutOptions.density, {
+    compact: 12,
+    balanced: 18,
+    spacious: 24,
+  });
   const contentWidth = pageWidth - margin * 2;
   const threeColumnWidth = (contentWidth - gutter * 2) / 3;
   const twoColumnWidth = (contentWidth - gutter) / 2;
-  const rows = buildLayoutRows(crops);
+  const rows = buildLayoutRows(crops, layoutOptions.density);
   const items: WorksheetItem[] = [];
+  const pages = [createPreviewPage(0, pageWidth, pageHeight)];
 
-  let page = pdf.addPage([pageWidth, pageHeight]);
   let pageIndex = 0;
-  let cursorY = pageHeight - margin;
+  let cursorTop = margin;
 
   for (const row of rows) {
     const placements = row.map((crop, index) => {
-      const columnSpan = chooseColumnSpan(crop);
       const slotWidth =
         row.length === 3 ? threeColumnWidth : row.length === 2 ? twoColumnWidth : contentWidth;
-      const layoutMode = chooseLayoutMode(crop, slotWidth);
-      const placement = measureItem(layoutMode, crop.width, crop.height, slotWidth, crop.classification);
+      const layoutMode = chooseLayoutMode(crop, slotWidth, layoutOptions.density);
+      const placement = measureItem(
+        layoutMode,
+        crop.width,
+        crop.height,
+        slotWidth,
+        crop.classification,
+        layoutOptions.density,
+        layoutOptions.promptScale,
+      );
       return {
         crop,
-        columnSpan,
+        columnSpan: row.length === 3 ? (1 as const) : row.length === 2 ? (2 as const) : (3 as const),
         placement,
         x:
           row.length === 3
@@ -1181,106 +482,213 @@ async function buildWorksheetPdf(crops: CropAsset[]) {
               : margin,
       };
     });
+    const headerPlacements = measureRowSectionHeaders(
+      row,
+      contentWidth,
+      margin,
+      layoutOptions.promptScale,
+    );
 
     const rowHeight = Math.max(...placements.map((item) => item.placement.blockHeight));
-    if (cursorY - rowHeight < margin) {
-      page = pdf.addPage([pageWidth, pageHeight]);
+    const headerHeight = headerPlacements.reduce((sum, header) => sum + header.rect.height, 0);
+    const headerGap = headerPlacements.length > 0 ? 8 : 0;
+    const headerInternalGap = Math.max(0, headerPlacements.length - 1) * 6;
+    const blockHeight = headerHeight + headerInternalGap + headerGap + rowHeight;
+
+    if (cursorTop + blockHeight > pageHeight - margin) {
       pageIndex += 1;
-      cursorY = pageHeight - margin;
+      pages.push(createPreviewPage(pageIndex, pageWidth, pageHeight));
+      cursorTop = margin;
     }
 
-    for (const item of placements) {
-      const image = await pdf.embedPng(item.crop.bytes);
-      drawWorksheetItem(page, image, item.x, cursorY, item.placement);
-      items.push({
-        id: `item-${items.length + 1}`,
-        regionId: item.crop.regionId,
+    for (const header of headerPlacements) {
+      const placement: WorksheetPagePlacement = {
+        ...header,
         pageIndex,
-        layoutMode: item.placement.layoutMode,
-        compositionMode: item.crop.compositionMode,
-        problemNumber: item.crop.problemNumber,
-        columnSpan: item.columnSpan,
+        rect: { ...header.rect, top: cursorTop },
+      };
+      pages[pageIndex].placements.push(placement);
+      cursorTop += placement.rect.height + 6;
+    }
+
+    if (headerPlacements.length > 0) {
+      cursorTop += 2;
+    }
+
+    for (const placementInfo of placements) {
+      const itemId = `item-${items.length + 1}`;
+      const problemPlacement = makeProblemPlacement(
+        itemId,
+        placementInfo.crop,
+        pageIndex,
+        placementInfo.x,
+        cursorTop,
+        placementInfo.placement,
+      );
+      pages[pageIndex].placements.push(problemPlacement);
+      items.push({
+        id: itemId,
+        regionId: placementInfo.crop.regionId,
+        pageIndex,
+        layoutMode: placementInfo.placement.layoutMode,
+        compositionMode: placementInfo.crop.compositionMode,
+        problemNumber: placementInfo.crop.problemNumber,
+        sourceLabel: placementInfo.crop.sourceLabel,
+        columnSpan: placementInfo.columnSpan,
         promptSize: {
-          width: Math.round(item.placement.prompt.width),
-          height: Math.round(item.placement.prompt.height),
+          width: Math.round(problemPlacement.prompt.width),
+          height: Math.round(problemPlacement.prompt.height),
         },
         answerArea: {
-          width: Math.round(item.placement.answer.width),
-          height: Math.round(item.placement.answer.height),
+          width: Math.round(problemPlacement.answerArea.width),
+          height: Math.round(problemPlacement.answerArea.height),
         },
       });
     }
 
-    cursorY -= rowHeight + 18;
+    cursorTop += rowHeight + rowGap;
   }
 
   return {
-    bytes: await pdf.save(),
-    pageCount: pdf.getPageCount(),
-    items,
+    pageCount: Math.max(1, pageIndex + 1),
+    worksheetItems: items,
+    pages,
   };
 }
 
-function buildLayoutRows(crops: CropAsset[]) {
-  const rows: CropAsset[][] = [];
+type MeasuredSectionHeaderPlacement = Omit<
+  Extract<WorksheetPagePlacement, { type: "section-header" }>,
+  "pageIndex"
+>;
+
+function createPreviewPage(pageIndex: number, width: number, height: number): WorksheetPreviewPage {
+  return {
+    pageIndex,
+    width,
+    height,
+    placements: [],
+  };
+}
+
+function measureRowSectionHeaders(
+  row: CropMetric[],
+  contentWidth: number,
+  margin: number,
+  promptScale: PromptScale,
+): MeasuredSectionHeaderPlacement[] {
+  const seen = new Set<string>();
+  const headers: MeasuredSectionHeaderPlacement[] = [];
+
+  for (const crop of row) {
+    for (const header of crop.sectionHeaders) {
+      const dedupeKey = rectKey(header.sourceRect);
+      if (seen.has(dedupeKey)) {
+        continue;
+      }
+      seen.add(dedupeKey);
+
+      const scale = Math.min(promptScaleValue(promptScale), contentWidth / header.width);
+      headers.push({
+        id: header.id,
+        type: "section-header",
+        regionId: crop.regionId,
+        sourceRect: header.sourceRect,
+        rect: {
+          left: margin,
+          top: 0,
+          width: header.width * scale,
+          height: header.height * scale,
+        },
+      });
+    }
+  }
+
+  return headers;
+}
+
+function makeProblemPlacement(
+  itemId: string,
+  crop: CropMetric,
+  pageIndex: number,
+  x: number,
+  top: number,
+  placement: Placement,
+): Extract<WorksheetPagePlacement, { type: "problem" }> {
+  const prompt = {
+    left: x,
+    top,
+    width: placement.prompt.width,
+    height: placement.prompt.height,
+  };
+  const answerArea = placement.stack
+    ? {
+        left: x,
+        top: top + placement.prompt.height + placement.gap,
+        width: placement.answer.width,
+        height: placement.answer.height,
+      }
+    : {
+        left: x + placement.prompt.width + placement.gap,
+        top,
+        width: placement.answer.width,
+        height: placement.answer.height,
+      };
+
+  return {
+    id: itemId,
+    type: "problem",
+    regionId: crop.regionId,
+    pageIndex,
+    sourceLabel: crop.sourceLabel,
+    rect: unionRects([prompt, answerArea]),
+    prompt,
+    answerArea,
+  };
+}
+
+function buildLayoutRows(crops: CropMetric[], density: LayoutDensity) {
+  const rows: CropMetric[][] = [];
   let index = 0;
 
   while (index < crops.length) {
     const current = crops[index];
-    if (chooseColumnSpan(current) === 3) {
+    if (current.classification === "complex") {
       rows.push([current]);
       index += 1;
       continue;
     }
 
-    if (current.classification === "simple") {
-      const simpleRow = [current];
-      let lookahead = index + 1;
-      while (
-        simpleRow.length < 3 &&
-        lookahead < crops.length &&
-        crops[lookahead].classification === "simple"
-      ) {
-        simpleRow.push(crops[lookahead]);
-        lookahead += 1;
-      }
+    const maxRowItems =
+      density === "compact" && current.classification === "simple"
+        ? 3
+        : density === "spacious" || current.classification === "standard"
+          ? 1
+          : 2;
+    const row = [current];
+    let lookahead = index + 1;
 
-      rows.push(simpleRow);
-      index += simpleRow.length;
-      continue;
+    while (
+      row.length < maxRowItems &&
+      lookahead < crops.length &&
+      crops[lookahead].classification !== "complex" &&
+      (density === "compact" || crops[lookahead].classification === current.classification)
+    ) {
+      row.push(crops[lookahead]);
+      lookahead += 1;
     }
 
-    const pair = [current];
-    if (index + 1 < crops.length && chooseColumnSpan(crops[index + 1]) !== 3) {
-      pair.push(crops[index + 1]);
-      index += 2;
-    } else {
-      index += 1;
-    }
-
-    rows.push(pair);
+    rows.push(row);
+    index += row.length;
   }
 
   return rows;
 }
 
-function chooseColumnSpan(crop: CropAsset): 1 | 2 | 3 {
-  if (crop.classification === "complex" || crop.height > 260) {
-    return 3;
-  }
-
-  if (crop.classification === "standard") {
-    return 2;
-  }
-
-  return 1;
-}
-
-function chooseLayoutMode(crop: CropAsset, slotWidth: number): LayoutMode {
+function chooseLayoutMode(crop: CropMetric, slotWidth: number, density: LayoutDensity): LayoutMode {
   if (
     crop.classification === "complex" ||
-    crop.height > 180 ||
-    crop.width > slotWidth * 0.82
+    crop.height > densityValue(density, { compact: 180, balanced: 170, spacious: 150 }) ||
+    crop.width > slotWidth * densityValue(density, { compact: 0.9, balanced: 0.84, spacious: 0.74 })
   ) {
     return "below";
   }
@@ -1294,190 +702,85 @@ function measureItem(
   height: number,
   slotWidth: number,
   classification: "simple" | "standard" | "complex",
+  density: LayoutDensity,
+  promptScale: PromptScale,
 ) {
+  const targetPromptScale = promptScaleValue(promptScale);
+  const densityScale = densityValue(density, {
+    compact: 0.74,
+    balanced: 1,
+    spacious: 1.28,
+  });
+
   if (layoutMode === "side") {
-    const promptTargetWidth =
-      classification === "simple" ? slotWidth * 0.42 : slotWidth * 0.46;
-    const promptScale = Math.min(promptTargetWidth / width, 120 / height, 1.65);
-    const promptWidth = width * promptScale;
-    const promptHeight = height * promptScale;
-    const answerWidth = Math.max(110, slotWidth - promptWidth - 16);
-    const answerHeight = Math.max(classification === "simple" ? 94 : 118, promptHeight + 8);
+    const scaledPrompt = Math.min(targetPromptScale, (slotWidth * 0.56) / width, 116 / height);
+    const promptWidth = width * scaledPrompt;
+    const promptHeight = height * scaledPrompt;
+    const gap = 12;
+    const answerWidth = Math.max(88, slotWidth - promptWidth - gap);
+    const answerHeight =
+      Math.max(classification === "simple" ? 78 : 104, promptHeight + 6) * densityScale;
 
     return {
       layoutMode,
-      blockHeight: Math.max(promptHeight, answerHeight) + 16,
+      blockHeight: Math.max(promptHeight, answerHeight),
       prompt: { width: promptWidth, height: promptHeight },
       answer: { width: answerWidth, height: answerHeight },
-      gap: 16,
+      gap,
       stack: false,
     };
   }
 
-  const promptScale = Math.min(
+  const scaledPrompt = Math.min(
+    targetPromptScale,
     slotWidth / width,
-    classification === "complex" ? 0.95 : 1.2,
-    180 / height,
+    densityValue(density, { compact: 154, balanced: 176, spacious: 190 }) / height,
   );
-  const promptWidth = width * promptScale;
-  const promptHeight = height * promptScale;
+  const promptWidth = width * scaledPrompt;
+  const promptHeight = height * scaledPrompt;
+  const gap = 10;
   const answerHeight =
     classification === "complex"
-      ? Math.max(150, Math.min(210, promptHeight * 0.9))
-      : Math.max(128, Math.min(176, promptHeight * 0.85));
+      ? Math.max(104, Math.min(210, promptHeight * 0.72)) * densityScale
+      : Math.max(104, Math.min(176, promptHeight * 0.78)) * densityScale;
 
   return {
     layoutMode,
-    blockHeight: promptHeight + answerHeight + 24,
+    blockHeight: promptHeight + gap + answerHeight,
     prompt: { width: promptWidth, height: promptHeight },
     answer: { width: slotWidth, height: answerHeight },
-    gap: 10,
+    gap,
     stack: true,
   };
 }
 
-function drawWorksheetItem(
-  page: PDFPage,
-  image: PDFImage,
-  x: number,
-  cursorY: number,
-  placement: ReturnType<typeof measureItem>,
-) {
-  const promptY = cursorY - placement.prompt.height;
+function promptScaleValue(promptScale: PromptScale) {
+  return ({
+    small: 0.42,
+    medium: 0.54,
+    large: 0.66,
+  } satisfies Record<PromptScale, number>)[promptScale];
+}
+
+function densityValue<T>(density: LayoutDensity, values: Record<LayoutDensity, T>) {
+  return values[density];
+}
+
+function drawImageRect(page: PDFPage, image: PDFImage, rect: Rect, pageHeight: number) {
   page.drawImage(image, {
-    x,
-    y: promptY,
-    width: placement.prompt.width,
-    height: placement.prompt.height,
+    x: rect.left,
+    y: pageHeight - rect.top - rect.height,
+    width: rect.width,
+    height: rect.height,
   });
-
-  if (placement.stack) {
-    const answerY = promptY - placement.gap - placement.answer.height;
-    drawAnswerArea(page, x, answerY, placement.answer.width, placement.answer.height);
-    return;
-  }
-
-  const answerX = x + placement.prompt.width + placement.gap;
-  const answerY = cursorY - placement.answer.height;
-  drawAnswerArea(page, answerX, answerY, placement.answer.width, placement.answer.height);
-}
-
-function drawAnswerArea(page: PDFPage, x: number, y: number, width: number, height: number) {
-  page.drawRectangle({
-    x,
-    y,
-    width,
-    height,
-    borderColor: rgb(0.79, 0.48, 0.32),
-    borderWidth: 1.1,
-    color: rgb(1, 1, 1),
-    opacity: 0.96,
-  });
-
-  for (let lineY = y + height - 22; lineY > y + 12; lineY -= 22) {
-    page.drawLine({
-      start: { x: x + 10, y: lineY },
-      end: { x: x + width - 10, y: lineY },
-      thickness: 0.75,
-      color: rgb(0.9, 0.78, 0.72),
-      opacity: 0.92,
-    });
-  }
-}
-
-function summarizeConfidence(problemRegions: InputProblemRegion[]): ConfidenceSummary {
-  const averageConfidence =
-    problemRegions.reduce((sum, region) => sum + region.confidence, 0) /
-    Math.max(1, problemRegions.length);
-  const lowConfidenceCount = problemRegions.filter((region) => region.confidence < 0.55).length;
-
-  return {
-    averageConfidence,
-    lowConfidenceCount,
-  };
-}
-
-function floodFill(
-  mask: Uint8Array,
-  visited: Uint8Array,
-  width: number,
-  height: number,
-  startX: number,
-  startY: number,
-) {
-  const queue: Array<[number, number]> = [[startX, startY]];
-  visited[startY * width + startX] = 1;
-
-  let left = startX;
-  let right = startX;
-  let top = startY;
-  let bottom = startY;
-  let area = 0;
-
-  while (queue.length > 0) {
-    const [x, y] = queue.pop()!;
-    area += 1;
-    left = Math.min(left, x);
-    right = Math.max(right, x);
-    top = Math.min(top, y);
-    bottom = Math.max(bottom, y);
-
-    const neighbors: Array<[number, number]> = [
-      [x - 1, y],
-      [x + 1, y],
-      [x, y - 1],
-      [x, y + 1],
-    ];
-
-    for (const [nextX, nextY] of neighbors) {
-      if (nextX < 0 || nextX >= width || nextY < 0 || nextY >= height) {
-        continue;
-      }
-
-      const offset = nextY * width + nextX;
-      if (!mask[offset] || visited[offset]) {
-        continue;
-      }
-
-      visited[offset] = 1;
-      queue.push([nextX, nextY]);
-    }
-  }
-
-  return {
-    left,
-    top,
-    width: right - left + 1,
-    height: bottom - top + 1,
-    area,
-  };
-}
-
-function padRect(rect: Rect, maxWidth: number, maxHeight: number, padding: number): Rect {
-  const finiteWidth = Number.isFinite(maxWidth)
-    ? maxWidth
-    : rect.left + rect.width + padding * 4;
-  const finiteHeight = Number.isFinite(maxHeight)
-    ? maxHeight
-    : rect.top + rect.height + padding * 4;
-  const left = Math.max(0, Math.floor(rect.left - padding));
-  const top = Math.max(0, Math.floor(rect.top - padding));
-  const right = Math.min(finiteWidth, Math.ceil(rect.left + rect.width + padding));
-  const bottom = Math.min(finiteHeight, Math.ceil(rect.top + rect.height + padding));
-
-  return {
-    left,
-    top,
-    width: Math.max(1, right - left),
-    height: Math.max(1, bottom - top),
-  };
 }
 
 function unionRects(rects: Rect[]) {
-  const left = Math.min(...rects.map((rect) => rect.left));
-  const top = Math.min(...rects.map((rect) => rect.top));
-  const right = Math.max(...rects.map((rect) => rect.left + rect.width));
-  const bottom = Math.max(...rects.map((rect) => rect.top + rect.height));
+  const safeRects = rects.length > 0 ? rects : [{ left: 0, top: 0, width: 1, height: 1 }];
+  const left = Math.min(...safeRects.map((rect) => rect.left));
+  const top = Math.min(...safeRects.map((rect) => rect.top));
+  const right = Math.max(...safeRects.map((rect) => rect.left + rect.width));
+  const bottom = Math.max(...safeRects.map((rect) => rect.top + rect.height));
 
   return {
     left,
@@ -1487,36 +790,13 @@ function unionRects(rects: Rect[]) {
   };
 }
 
-function intersects(a: Rect, b: Rect) {
-  return (
-    a.left < b.left + b.width &&
-    a.left + a.width > b.left &&
-    a.top < b.top + b.height &&
-    a.top + a.height > b.top
-  );
-}
-
-function rectContains(rect: Rect, x: number, y: number) {
-  return (
-    x >= rect.left &&
-    x <= rect.left + rect.width &&
-    y >= rect.top &&
-    y <= rect.top + rect.height
-  );
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function findLastIndex<T>(values: T[], predicate: (value: T) => boolean) {
-  for (let index = values.length - 1; index >= 0; index -= 1) {
-    if (predicate(values[index])) {
-      return index;
-    }
-  }
-
-  return -1;
+function rectKey(rect: Rect) {
+  return [
+    Math.round(rect.left),
+    Math.round(rect.top),
+    Math.round(rect.width),
+    Math.round(rect.height),
+  ].join(":");
 }
 
 function canvasToBlob(canvas: HTMLCanvasElement) {
