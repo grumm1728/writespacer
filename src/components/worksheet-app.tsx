@@ -11,7 +11,6 @@ import {
   revokeWorksheetResult,
 } from "@/lib/client-processing";
 import type {
-  DetectionDebugSnapshot,
   LayoutDensity,
   PromptScale,
   ProblemDraft,
@@ -23,7 +22,41 @@ import type {
 } from "@/lib/types";
 
 const ACCEPT = "image/png,image/jpeg,image/webp";
-const DEFAULT_SAMPLE_PATH = "./fixtures/pershan-problem-set-example.png";
+
+const SAMPLE_WORKSHEETS = [
+  {
+    title: "Textbook equations",
+    description: "Dense algebra page with equations and graphs.",
+    filename: "pershan-problem-set-example.png",
+    path: "./fixtures/pershan-problem-set-example.png",
+  },
+  {
+    title: "Original sample",
+    description: "Early worksheet sample used during development.",
+    filename: "sample-input.png",
+    path: "./fixtures/sample-input.png",
+  },
+  {
+    title: "Sample 02",
+    description: "Additional classroom worksheet sample.",
+    filename: "sample-input-02.jpg",
+    path: "./fixtures/sample-input-02.jpg",
+  },
+  {
+    title: "Geometry sample",
+    description: "Geometry worksheet with diagrams.",
+    filename: "sample-input-03-geometry.jpg",
+    path: "./fixtures/sample-input-03-geometry.jpg",
+  },
+  {
+    title: "Calculus sample",
+    description: "Calculus worksheet sample.",
+    filename: "sample-input-04-calculus.png",
+    path: "./fixtures/sample-input-04-calculus.png",
+  },
+] as const;
+
+type SampleWorksheet = (typeof SAMPLE_WORKSHEETS)[number];
 
 const statusCopy: Record<WorksheetStatus, string> = {
   idle: "Ready",
@@ -55,7 +88,7 @@ export function WorksheetApp() {
   const [status, setStatus] = useState<WorksheetStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [showDebugOverlay, setShowDebugOverlay] = useState(false);
+  const [showSampleModal, setShowSampleModal] = useState(false);
   const [selectedDraftId, setSelectedDraftId] = useState<string | null>(null);
   const [density, setDensity] = useState<LayoutDensity>(DEFAULT_LAYOUT_OPTIONS.density);
   const [promptScale, setPromptScale] = useState<PromptScale>(
@@ -90,10 +123,15 @@ export function WorksheetApp() {
     () => previewWorksheetLayout(drafts, { density, promptScale }),
     [density, drafts, promptScale],
   );
+  const canGenerate = Boolean(file) && includedDrafts.length > 0;
+
   function clearCurrentResult() {
     if (result) {
       revokeWorksheetResult(result);
       setResult(null);
+      if (analysis) {
+        setStatus("reviewing");
+      }
     }
   }
 
@@ -174,24 +212,25 @@ export function WorksheetApp() {
     }
   }
 
-  async function loadDefaultSample() {
+  async function loadSampleWorksheet(sample: SampleWorksheet) {
     try {
-      const response = await fetch(DEFAULT_SAMPLE_PATH);
+      const response = await fetch(sample.path);
       if (!response.ok) {
-        throw new Error("The default sample image could not be loaded.");
+        throw new Error("The sample image could not be loaded.");
       }
 
       const blob = await response.blob();
-      const sampleFile = new File([blob], "pershan-problem-set-example.png", {
+      const sampleFile = new File([blob], sample.filename, {
         type: blob.type || "image/png",
       });
       applySelectedFile(sampleFile, URL.createObjectURL(blob));
+      setShowSampleModal(false);
     } catch (sampleError) {
       setStatus("failed");
       setError(
         sampleError instanceof Error
           ? sampleError.message
-          : "The default sample image could not be loaded.",
+          : "The sample image could not be loaded.",
       );
     }
   }
@@ -235,28 +274,20 @@ export function WorksheetApp() {
     );
   }
 
-  function mergeSelectedWithNext() {
-    if (!selectedDraftId) {
+  function clearAllBoxes() {
+    clearCurrentResult();
+    setDrafts([]);
+    setSelectedDraftId(null);
+    setEditMode("select");
+    setDrawPreview(null);
+  }
+
+  function toggleDrawMode() {
+    if (!analysis) {
       return;
     }
 
-    clearCurrentResult();
-    setDrafts((current) => {
-      const index = current.findIndex((draft) => draft.id === selectedDraftId);
-      if (index < 0 || index + 1 >= current.length) {
-        return current;
-      }
-
-      const selected = current[index];
-      const next = current[index + 1];
-      const mergedBounds = padBounds(unionRects([selected.unionBounds, next.unionBounds]), analysis);
-      const merged = makeEditedDraft(selected, mergedBounds, selected.orderIndex);
-      return reindexDrafts([
-        ...current.slice(0, index),
-        merged,
-        ...current.slice(index + 2),
-      ]);
-    });
+    setEditMode((current) => (current === "draw" ? "select" : "draw"));
   }
 
   function startDraftInteraction(
@@ -347,7 +378,6 @@ export function WorksheetApp() {
 
   const imageWidth = analysis?.sourceImage.width ?? result?.sourceImage.width ?? 1;
   const imageHeight = analysis?.sourceImage.height ?? result?.sourceImage.height ?? 1;
-  const debug = analysis?.debug ?? null;
 
   return (
     <main className="app-shell">
@@ -398,60 +428,97 @@ export function WorksheetApp() {
             {statusCopy[status]}
           </span>
 
-          <div className="upload-dropzone">
-            <input
-              id="worksheet-upload"
-              accept={ACCEPT}
-              className="sr-only"
-              type="file"
-              onChange={(event) => {
-                const nextFile = event.target.files?.[0] ?? null;
-                applySelectedFile(nextFile, nextFile ? URL.createObjectURL(nextFile) : null);
-              }}
-            />
-            <div className="dropzone-copy">
-              <div>
-                <h2>Add a dense problem page</h2>
-                {file ? (
-                  <span className="file-pill">
-                    {file.name} | {(file.size / 1024 / 1024).toFixed(2)} MB
-                  </span>
-                ) : (
-                  <span className="helper-text">
-                    PNG, JPEG, or WebP. A built-in sample page is available too.
-                  </span>
-                )}
-              </div>
+          <div className="workflow-control-stack">
+            <div className="workflow-control-grid">
+              <section className="control-card">
+                <input
+                  id="worksheet-upload"
+                  accept={ACCEPT}
+                  className="sr-only"
+                  type="file"
+                  onChange={(event) => {
+                    const nextFile = event.target.files?.[0] ?? null;
+                    applySelectedFile(nextFile, nextFile ? URL.createObjectURL(nextFile) : null);
+                  }}
+                />
+                <div className="control-card-copy">
+                  <h2>Source</h2>
+                  {file ? (
+                    <span className="file-pill">
+                      {file.name} | {(file.size / 1024 / 1024).toFixed(2)} MB
+                    </span>
+                  ) : (
+                    <span className="helper-text">
+                      Add a dense worksheet photo, screenshot, or sample.
+                    </span>
+                  )}
+                </div>
 
-              <div className="controls">
-                <label className="button-secondary" htmlFor="worksheet-upload">
-                  Choose file
-                </label>
-                <button
-                  className="button-secondary"
-                  disabled={status === "analyzing" || status === "generating"}
-                  onClick={loadDefaultSample}
-                  type="button"
-                >
-                  Use sample
-                </button>
-                <button
-                  className="button"
-                  disabled={!file || status === "analyzing" || status === "generating"}
-                  onClick={handleAnalyze}
-                  type="button"
-                >
-                  {status === "analyzing" ? "Analyzing..." : "Analyze"}
-                </button>
-                <button
-                  className="button-secondary"
-                  disabled={status === "analyzing" || status === "generating"}
-                  onClick={resetFlow}
-                  type="button"
-                >
-                  Reset
-                </button>
-              </div>
+                <div className="controls">
+                  <label
+                    className={file ? "button-secondary" : "button"}
+                    htmlFor="worksheet-upload"
+                  >
+                    Choose file
+                  </label>
+                  <button
+                    className="button-secondary"
+                    disabled={status === "analyzing" || status === "generating"}
+                    onClick={() => setShowSampleModal(true)}
+                    type="button"
+                  >
+                    Use sample
+                  </button>
+                  <button
+                    className="button-secondary"
+                    disabled={status === "analyzing" || status === "generating"}
+                    onClick={resetFlow}
+                    type="button"
+                  >
+                    Reset
+                  </button>
+                </div>
+              </section>
+
+              <section className="control-card">
+                <div className="control-card-copy">
+                  <h2>Review</h2>
+                  <span className="helper-text">
+                    {analysis
+                      ? `${includedDrafts.length} boxes included`
+                      : file
+                        ? "Ready to detect problem boxes."
+                        : "Add a source page first."}
+                  </span>
+                </div>
+
+                <div className="controls">
+                  <button
+                    className={file ? "button" : "button-secondary"}
+                    disabled={!file || status === "analyzing" || status === "generating"}
+                    onClick={handleAnalyze}
+                    type="button"
+                  >
+                    {status === "analyzing" ? "Auto analyzing..." : "Auto Analyze"}
+                  </button>
+                  <button
+                    className={editMode === "draw" ? "button-secondary active" : "button-secondary"}
+                    disabled={!analysis || status === "analyzing" || status === "generating"}
+                    onClick={toggleDrawMode}
+                    type="button"
+                  >
+                    Manual Box
+                  </button>
+                  <button
+                    className="button-secondary"
+                    disabled={drafts.length === 0 || status === "analyzing" || status === "generating"}
+                    onClick={clearAllBoxes}
+                    type="button"
+                  >
+                    Clear all boxes
+                  </button>
+                </div>
+              </section>
             </div>
             {error ? <p className="error-text">{error}</p> : null}
           </div>
@@ -469,33 +536,6 @@ export function WorksheetApp() {
                       {analysis ? `${includedDrafts.length} boxes included` : "Source loaded"}
                     </span>
                   </div>
-                  {analysis ? (
-                    <div className="debug-actions">
-                      <label className="toggle">
-                        <input
-                          checked={showDebugOverlay}
-                          onChange={(event) => setShowDebugOverlay(event.target.checked)}
-                          type="checkbox"
-                        />
-                        <span>Guides</span>
-                      </label>
-                      <button
-                        className={editMode === "draw" ? "button-secondary active" : "button-secondary"}
-                        onClick={() => setEditMode((current) => (current === "draw" ? "select" : "draw"))}
-                        type="button"
-                      >
-                        Draw box
-                      </button>
-                      <button
-                        className="button-secondary"
-                        disabled={!selectedDraftId || drafts.length < 2}
-                        onClick={mergeSelectedWithNext}
-                        type="button"
-                      >
-                        Merge next
-                      </button>
-                    </div>
-                  ) : null}
                 </div>
                   {analysis ? (
                     <div
@@ -513,13 +553,6 @@ export function WorksheetApp() {
                     >
                       {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img alt="Uploaded worksheet preview" src={previewUrl} />
-                      {showDebugOverlay && debug ? (
-                        <DebugOverlay
-                          debug={debug}
-                          imageHeight={imageHeight}
-                          imageWidth={imageWidth}
-                        />
-                      ) : null}
                       {drafts.map((draft, index) => (
                         <OverlayRect
                           key={draft.id}
@@ -597,10 +630,26 @@ export function WorksheetApp() {
 
           <aside className="status-card">
             <div className="output-title">
-              <h3>Preview output</h3>
+              <h3>Handout</h3>
               <span className="meta-text">
                 {result ? "PDF ready" : `${layoutPreview.pageCount} page preview`}
               </span>
+            </div>
+            <div className="handout-actions">
+              {result ? (
+                <a className="button-danger" download="worksheet.pdf" href={result.pdfUrl}>
+                  Generate PDF
+                </a>
+              ) : (
+                <button
+                  className="button-danger"
+                  disabled={!canGenerate || status === "generating"}
+                  onClick={handleGenerate}
+                  type="button"
+                >
+                  {status === "generating" ? "Generating..." : "Generate PDF"}
+                </button>
+              )}
             </div>
             <div className="density-control" role="group" aria-label="Worksheet density">
               {(["compact", "balanced", "spacious"] as const).map((option) => (
@@ -656,24 +705,55 @@ export function WorksheetApp() {
                 sourceUrl={previewUrl}
               />
             ) : null}
-            <button
-              className="button"
-              disabled={!file || includedDrafts.length === 0 || status === "generating"}
-              onClick={handleGenerate}
-              type="button"
-            >
-              {status === "generating" ? "Generating..." : "Generate worksheet PDF"}
-            </button>
-            {result ? (
-              <a className="button-secondary" download="worksheet.pdf" href={result.pdfUrl}>
-                Download PDF
-              </a>
-            ) : (
-              <p className="meta-text">Analyze a worksheet to enable download.</p>
-            )}
           </aside>
         </div>
       </section>
+
+      {showSampleModal ? (
+        <div
+          aria-labelledby="sample-modal-title"
+          aria-modal="true"
+          className="modal-backdrop"
+          role="dialog"
+        >
+          <div className="sample-modal">
+            <div className="modal-header">
+              <div>
+                <h2 id="sample-modal-title">Choose a sample</h2>
+                <p className="meta-text">Load one of the sample worksheets to try the flow.</p>
+              </div>
+              <button
+                aria-label="Close sample chooser"
+                className="button-secondary"
+                onClick={() => setShowSampleModal(false)}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="sample-grid">
+              {SAMPLE_WORKSHEETS.map((sample) => (
+                <button
+                  key={sample.filename}
+                  className="sample-option"
+                  onClick={() => loadSampleWorksheet(sample)}
+                  type="button"
+                >
+                  <span className="sample-thumbnail">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img alt="" aria-hidden="true" src={sample.path} />
+                  </span>
+                  <span className="sample-copy">
+                    <strong>{sample.title}</strong>
+                    <span>{sample.description}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }
@@ -834,41 +914,6 @@ function SourceCrop({
         }}
       />
     </div>
-  );
-}
-
-function DebugOverlay({
-  debug,
-  imageHeight,
-  imageWidth,
-}: {
-  debug: DetectionDebugSnapshot;
-  imageHeight: number;
-  imageWidth: number;
-}) {
-  return (
-    <>
-      {debug.columns.map((column) => (
-        <OverlayRect
-          key={column.id}
-          imageHeight={imageHeight}
-          imageWidth={imageWidth}
-          label=""
-          rect={column.rect}
-          tone="column"
-        />
-      ))}
-      {debug.anchorCandidates.map((candidate) => (
-        <OverlayRect
-          key={candidate.id}
-          imageHeight={imageHeight}
-          imageWidth={imageWidth}
-          label=""
-          rect={candidate.rect}
-          tone={candidate.accepted ? "anchor" : "rejected"}
-        />
-      ))}
-    </>
   );
 }
 
