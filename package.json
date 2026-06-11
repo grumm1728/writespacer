@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:detector": "vitest run src/lib/detection.test.ts src/lib/layout.test.ts"
   },
   "dependencies": {
     "next": "16.1.6",
@@ -16,10 +17,13 @@
   },
   "devDependencies": {
     "@types/node": "^20",
+    "@types/pngjs": "^6.0.5",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
-    "typescript": "^5"
+    "pngjs": "^7.0.0",
+    "typescript": "^5",
+    "vitest": "^4.1.8"
   }
 }
