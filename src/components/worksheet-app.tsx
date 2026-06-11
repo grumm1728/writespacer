@@ -55,7 +55,7 @@ export function WorksheetApp() {
   const [status, setStatus] = useState<WorksheetStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [showDebugOverlay, setShowDebugOverlay] = useState(true);
+  const [showDebugOverlay, setShowDebugOverlay] = useState(false);
   const [selectedDraftId, setSelectedDraftId] = useState<string | null>(null);
   const [density, setDensity] = useState<LayoutDensity>(DEFAULT_LAYOUT_OPTIONS.density);
   const [promptScale, setPromptScale] = useState<PromptScale>(
@@ -90,15 +90,6 @@ export function WorksheetApp() {
     () => previewWorksheetLayout(drafts, { density, promptScale }),
     [density, drafts, promptScale],
   );
-  const confidencePct = analysis
-    ? Math.round(analysis.confidenceSummary.averageConfidence * 100)
-    : null;
-  const detectedProblems = drafts
-    .map((draft, index) => (draft.included ? displayLabels[index] : null))
-    .filter(Boolean)
-    .slice(0, 16)
-    .join(", ");
-
   function clearCurrentResult() {
     if (result) {
       revokeWorksheetResult(result);
@@ -360,41 +351,41 @@ export function WorksheetApp() {
 
   return (
     <main className="app-shell">
-      <section className="hero-card">
-        <div className="hero-grid">
+      <section className="panel app-workspace">
+        <header className="app-header">
           <div>
-            <h1 className="hero-title">Give students room to show the work.</h1>
-            <p className="hero-copy">
-              Upload a screenshot or photo of a dense math page. WriteSpacer
-              isolates each prompt, keeps diagrams attached, and lays everything
-              out on a printable PDF with generous answer space, directly in the
-              browser.
+            <span className="eyebrow">WriteSpacer</span>
+            <h1>Dense page in. Spacious handout out.</h1>
+            <p>
+              For turning photographed or scanned problem sets into printable
+              student workspace.
             </p>
           </div>
 
-          <div className="paper-stack" aria-hidden="true">
-            <div className="paper-shadow" />
-            <div className="paper-sheet">
-              <div className="paper-header">
-                <span>Math Practice</span>
-                <span>Name</span>
-              </div>
-              <div className="paper-problem">
-                <div className="prompt" />
-                <div className="workspace" />
-              </div>
-              <div className="paper-problem">
-                <div className="prompt" />
-                <div className="workspace" />
-              </div>
+          <div className="workflow-steps" aria-label="Workflow status">
+            <div className={`workflow-step ${file ? "complete" : "active"}`}>
+              <span>1</span>
+              <strong>Source</strong>
+              <small>{file ? "Loaded" : "Needed"}</small>
+            </div>
+            <div
+              className={`workflow-step ${
+                analysis ? "complete" : file ? "active" : ""
+              }`}
+            >
+              <span>2</span>
+              <strong>Review</strong>
+              <small>{analysis ? `${includedDrafts.length} boxes` : "Waiting"}</small>
+            </div>
+            <div className={`workflow-step ${result ? "complete" : analysis ? "active" : ""}`}>
+              <span>3</span>
+              <strong>Handout</strong>
+              <small>{result ? "Ready" : `${layoutPreview.pageCount} pages`}</small>
             </div>
           </div>
-        </div>
-      </section>
+        </header>
 
-      <section className="panel">
-        <div className="section-header">
-          <h2>Input</h2>
+        <div className="source-bar">
           <span
             className={`status-pill ${
               status === "complete" || status === "reviewing"
@@ -406,24 +397,21 @@ export function WorksheetApp() {
           >
             {statusCopy[status]}
           </span>
-        </div>
 
-        <div className="upload-layout">
-          <div className="workspace-column">
-            <div className="upload-dropzone">
-              <input
-                id="worksheet-upload"
-                accept={ACCEPT}
-                className="sr-only"
-                type="file"
-                onChange={(event) => {
-                  const nextFile = event.target.files?.[0] ?? null;
-                  applySelectedFile(nextFile, nextFile ? URL.createObjectURL(nextFile) : null);
-                }}
-              />
-              <div className="dropzone-copy">
-                <span className="eyebrow">Input</span>
-                <h3>Drop a worksheet photo or screenshot here</h3>
+          <div className="upload-dropzone">
+            <input
+              id="worksheet-upload"
+              accept={ACCEPT}
+              className="sr-only"
+              type="file"
+              onChange={(event) => {
+                const nextFile = event.target.files?.[0] ?? null;
+                applySelectedFile(nextFile, nextFile ? URL.createObjectURL(nextFile) : null);
+              }}
+            />
+            <div className="dropzone-copy">
+              <div>
+                <h2>Add a dense problem page</h2>
                 {file ? (
                   <span className="file-pill">
                     {file.name} | {(file.size / 1024 / 1024).toFixed(2)} MB
@@ -433,121 +421,147 @@ export function WorksheetApp() {
                     PNG, JPEG, or WebP. A built-in sample page is available too.
                   </span>
                 )}
-                <div className="controls">
-                  <label className="button-secondary" htmlFor="worksheet-upload">
-                    Choose file
-                  </label>
-                  <button
-                    className="button-secondary"
-                    disabled={status === "analyzing" || status === "generating"}
-                    onClick={loadDefaultSample}
-                    type="button"
-                  >
-                    Use sample page
-                  </button>
-                  <button
-                    className="button"
-                    disabled={!file || status === "analyzing" || status === "generating"}
-                    onClick={handleAnalyze}
-                    type="button"
-                  >
-                    {status === "analyzing" ? "Analyzing..." : "Analyze worksheet"}
-                  </button>
-                  <button
-                    className="button-secondary"
-                    disabled={status === "analyzing" || status === "generating"}
-                    onClick={resetFlow}
-                    type="button"
-                  >
-                    Reset
-                  </button>
-                </div>
-                {error ? <p style={{ color: "var(--error)" }}>{error}</p> : null}
+              </div>
+
+              <div className="controls">
+                <label className="button-secondary" htmlFor="worksheet-upload">
+                  Choose file
+                </label>
+                <button
+                  className="button-secondary"
+                  disabled={status === "analyzing" || status === "generating"}
+                  onClick={loadDefaultSample}
+                  type="button"
+                >
+                  Use sample
+                </button>
+                <button
+                  className="button"
+                  disabled={!file || status === "analyzing" || status === "generating"}
+                  onClick={handleAnalyze}
+                  type="button"
+                >
+                  {status === "analyzing" ? "Analyzing..." : "Analyze"}
+                </button>
+                <button
+                  className="button-secondary"
+                  disabled={status === "analyzing" || status === "generating"}
+                  onClick={resetFlow}
+                  type="button"
+                >
+                  Reset
+                </button>
               </div>
             </div>
+            {error ? <p className="error-text">{error}</p> : null}
+          </div>
+        </div>
 
-            {previewUrl && analysis ? (
-              <div className="debug-panel">
+        <div className="upload-layout">
+          <div className="workspace-column">
+            <section className="debug-panel review-canvas-panel">
+              {previewUrl ? (
+                <>
                 <div className="debug-header">
-                  <h3>Review</h3>
-                  <div className="debug-actions">
-                    <label className="toggle">
-                      <input
-                        checked={showDebugOverlay}
-                        onChange={(event) => setShowDebugOverlay(event.target.checked)}
-                        type="checkbox"
-                      />
-                      <span>Debug</span>
-                    </label>
-                    <button
-                      className={editMode === "draw" ? "button-secondary active" : "button-secondary"}
-                      onClick={() => setEditMode((current) => (current === "draw" ? "select" : "draw"))}
-                      type="button"
-                    >
-                      Draw box
-                    </button>
-                    <button
-                      className="button-secondary"
-                      disabled={!selectedDraftId || drafts.length < 2}
-                      onClick={mergeSelectedWithNext}
-                      type="button"
-                    >
-                      Merge next
-                    </button>
+                  <div>
+                    <h3>Review input</h3>
+                    <span className="meta-text">
+                      {analysis ? `${includedDrafts.length} boxes included` : "Source loaded"}
+                    </span>
                   </div>
-                </div>
-                <div
-                  ref={canvasRef}
-                  className={`debug-canvas ${editMode === "draw" ? "drawing" : ""}`}
-                  onPointerDown={startDraw}
-                  onPointerMove={handlePointerMove}
-                  onPointerUp={handlePointerUp}
-                  style={
-                    {
-                      "--image-width": imageWidth,
-                      "--image-height": imageHeight,
-                    } as React.CSSProperties
-                  }
-                >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img alt="Uploaded worksheet preview" src={previewUrl} />
-                  {showDebugOverlay && debug ? (
-                    <DebugOverlay
-                      debug={debug}
-                      imageHeight={imageHeight}
-                      imageWidth={imageWidth}
-                    />
-                  ) : null}
-                  {drafts.map((draft, index) => (
-                    <OverlayRect
-                      key={draft.id}
-                      imageHeight={imageHeight}
-                      imageWidth={imageWidth}
-                      isSelected={draft.id === selectedDraftId}
-                      label={displayLabels[index]}
-                      onPointerDown={(event) => startDraftInteraction(event, draft, "move")}
-                      onResizePointerDown={(event) => startDraftInteraction(event, draft, "resize")}
-                      rect={draft.unionBounds}
-                      tone={draft.included ? "region" : "muted"}
-                    />
-                  ))}
-                  {drawPreview ? (
-                    <OverlayRect
-                      imageHeight={imageHeight}
-                      imageWidth={imageWidth}
-                      label=""
-                      rect={drawPreview}
-                      tone="draw"
-                    />
+                  {analysis ? (
+                    <div className="debug-actions">
+                      <label className="toggle">
+                        <input
+                          checked={showDebugOverlay}
+                          onChange={(event) => setShowDebugOverlay(event.target.checked)}
+                          type="checkbox"
+                        />
+                        <span>Guides</span>
+                      </label>
+                      <button
+                        className={editMode === "draw" ? "button-secondary active" : "button-secondary"}
+                        onClick={() => setEditMode((current) => (current === "draw" ? "select" : "draw"))}
+                        type="button"
+                      >
+                        Draw box
+                      </button>
+                      <button
+                        className="button-secondary"
+                        disabled={!selectedDraftId || drafts.length < 2}
+                        onClick={mergeSelectedWithNext}
+                        type="button"
+                      >
+                        Merge next
+                      </button>
+                    </div>
                   ) : null}
                 </div>
-              </div>
-            ) : null}
+                  {analysis ? (
+                    <div
+                      ref={canvasRef}
+                      className={`debug-canvas ${editMode === "draw" ? "drawing" : ""}`}
+                      onPointerDown={startDraw}
+                      onPointerMove={handlePointerMove}
+                      onPointerUp={handlePointerUp}
+                      style={
+                        {
+                          "--image-width": imageWidth,
+                          "--image-height": imageHeight,
+                        } as React.CSSProperties
+                      }
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img alt="Uploaded worksheet preview" src={previewUrl} />
+                      {showDebugOverlay && debug ? (
+                        <DebugOverlay
+                          debug={debug}
+                          imageHeight={imageHeight}
+                          imageWidth={imageWidth}
+                        />
+                      ) : null}
+                      {drafts.map((draft, index) => (
+                        <OverlayRect
+                          key={draft.id}
+                          imageHeight={imageHeight}
+                          imageWidth={imageWidth}
+                          isSelected={draft.id === selectedDraftId}
+                          label={displayLabels[index]}
+                          onPointerDown={(event) => startDraftInteraction(event, draft, "move")}
+                          onResizePointerDown={(event) => startDraftInteraction(event, draft, "resize")}
+                          rect={draft.unionBounds}
+                          tone={draft.included ? "region" : "muted"}
+                        />
+                      ))}
+                      {drawPreview ? (
+                        <OverlayRect
+                          imageHeight={imageHeight}
+                          imageWidth={imageWidth}
+                          label=""
+                          rect={drawPreview}
+                          tone="draw"
+                        />
+                      ) : null}
+                    </div>
+                  ) : (
+                    <div className="source-preview">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img alt="Uploaded worksheet preview" src={previewUrl} />
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="empty-workspace">
+                  <h3>Review input</h3>
+                  <p>Load a problem page to inspect the source here.</p>
+                </div>
+              )}
+            </section>
 
             {drafts.length > 0 ? (
               <div className="review-panel">
                 <div className="debug-header">
-                  <h3>Detected boxes</h3>
+                  <h3>Problem boxes</h3>
                   <span className="meta-text">{includedDrafts.length} included</span>
                 </div>
                 <div className="review-list">
@@ -573,7 +587,6 @@ export function WorksheetApp() {
                         value={baseLabel}
                       />
                       <span className="label-preview">{displayLabels[index]}</span>
-                      <span>{Math.round(draft.confidence * 100)}%</span>
                     </div>
                     );
                   })}
@@ -583,7 +596,12 @@ export function WorksheetApp() {
           </div>
 
           <aside className="status-card">
-            <h3>Output</h3>
+            <div className="output-title">
+              <h3>Preview output</h3>
+              <span className="meta-text">
+                {result ? "PDF ready" : `${layoutPreview.pageCount} page preview`}
+              </span>
+            </div>
             <div className="density-control" role="group" aria-label="Worksheet density">
               {(["compact", "balanced", "spacious"] as const).map((option) => (
                 <button
@@ -624,18 +642,8 @@ export function WorksheetApp() {
                 <p>{result ? result.pageCount : layoutPreview.pageCount}</p>
               </div>
               <div className="item-card">
-                <h4>Confidence</h4>
-                <p>{confidencePct !== null ? `${confidencePct}%` : "Not ready"}</p>
-              </div>
-            </div>
-            <div className="status-grid">
-              <div className="item-card">
-                <h4>Low-confidence regions</h4>
-                <p>{analysis ? analysis.confidenceSummary.lowConfidenceCount : "0"}</p>
-              </div>
-              <div className="item-card">
-                <h4>Problem order</h4>
-                <p>{detectedProblems || "Not ready"}</p>
+                <h4>Spacing</h4>
+                <p>{density}</p>
               </div>
             </div>
             {previewUrl && analysis ? (
