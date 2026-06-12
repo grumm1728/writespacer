@@ -17,6 +17,7 @@
 /.next/
 /out/
 /.worksheet-data/
+/public/tesseract/
 
 # production
 /build
@@ -32,6 +33,7 @@ yarn-error.log*
 .pnpm-debug.log*
 server.log
 sample-input.png
+!/public/fixtures/sample-input.png
 sample-output.pdf
 
 # env files (can opt-in for committing if needed)

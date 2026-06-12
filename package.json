@@ -3,17 +3,23 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "prepare:ocr-assets": "node scripts/copy-tesseract-assets.mjs",
+    "postinstall": "npm run prepare:ocr-assets",
+    "predev": "npm run prepare:ocr-assets",
     "dev": "next dev",
+    "prebuild": "npm run prepare:ocr-assets",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test:detector": "vitest run src/lib/detection.test.ts src/lib/layout.test.ts"
+    "test:detector": "vitest run src/lib/anchor-ocr.test.ts src/lib/detection.test.ts src/lib/layout.test.ts"
   },
   "dependencies": {
+    "@tesseract.js-data/eng": "1.0.0",
     "next": "16.1.6",
     "pdf-lib": "^1.17.1",
     "react": "19.2.3",
-    "react-dom": "19.2.3"
+    "react-dom": "19.2.3",
+    "tesseract.js": "7.0.0"
   },
   "devDependencies": {
     "@types/node": "^20",
@@ -23,6 +29,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
     "pngjs": "^7.0.0",
+    "sharp": "^0.35.1",
     "typescript": "^5",
     "vitest": "^4.1.8"
   }

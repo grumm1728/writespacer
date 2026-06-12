@@ -1,6 +1,11 @@
 import { PDFDocument, PDFImage, PDFPage } from "pdf-lib";
 
-import { analyzeWorksheetImage, summarizeConfidence } from "@/lib/detection";
+import { recognizeAnchorProposals } from "@/lib/anchor-ocr";
+import {
+  detectWorksheetStructure,
+  finalizeWorksheetDetection,
+  summarizeConfidence,
+} from "@/lib/detection";
 import type {
   CompositionMode,
   InputProblemRegion,
@@ -67,12 +72,14 @@ export async function analyzeWorksheetFile(file: File): Promise<WorksheetAnalysi
   assertUpload(file);
 
   const source = await loadWorksheetSource(file);
-  const analysis = analyzeWorksheetImage({
+  const structure = detectWorksheetStructure({
     grayscale: source.grayscale,
     height: source.metadata.height,
     rgba: source.imageData.data,
     width: source.metadata.width,
   });
+  const recognitions = await recognizeAnchorProposals(source.canvas, structure.proposals);
+  const analysis = finalizeWorksheetDetection(structure, recognitions);
 
   return {
     sourceImage: source.metadata,

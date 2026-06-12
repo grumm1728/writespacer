@@ -135,15 +135,35 @@ export type AnchorDebugCandidate = DebugRect & {
   reason: string;
 };
 
+export type AnchorRecognition = {
+  proposalId: string;
+  sourceLabel: string;
+  confidence: number;
+};
+
+export type DetectionStageCounts = {
+  components: number;
+  textComponents: number;
+  rows: number;
+  segments: number;
+  proposals: number;
+  recognizedAnchors: number;
+  acceptedAnchors: number;
+};
+
 export type DetectionDebugSnapshot = {
   contentBounds: Rect;
+  normalizationScale: number;
   rows: DebugRect[];
   segments: DebugRect[];
   columns: DebugRect[];
+  layoutTracks: DebugRect[];
   zones: DebugRect[];
   anchorCandidates: AnchorDebugCandidate[];
   rejectedAnchorReasons: string[];
   sectionHeaders: SectionHeader[];
+  stageCounts: DetectionStageCounts;
+  fallbackUsed: boolean;
   warnings: string[];
   failureReason: string | null;
 };
