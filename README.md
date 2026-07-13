@@ -56,6 +56,17 @@ npm.cmd run build
 
 `test:detector` runs both detector fixture tests and shared layout-placement tests.
 
+Detector research can use dev-only Claude draft annotations without changing the production app:
+
+```powershell
+npm.cmd run annotate:detector:claude -- --dir public/fixtures --dir "more sample photos" --dry-run
+npm.cmd run annotate:detector:claude -- --dir public/fixtures --dir "more sample photos"
+npm.cmd run compare:detector:annotations
+npm.cmd run test:llm-drafts
+```
+
+Put `ANTHROPIC_API_KEY=...` in an uncommitted `.env` file or set it in the shell before running the non-dry-run annotation command. Only run the upload command for images that are safe to send to Anthropic. Raw Claude output is written to `.worksheet-data/llm-annotations` and should be reviewed before any annotation is committed to `public/fixtures/llm-assisted-annotations.json`.
+
 ## Architecture
 
 - `src/lib/detection.ts`: pure grayscale/image-data detection, source labels, section headers, and debug output.

@@ -9,11 +9,21 @@ import {
   finalizeWorksheetDetection,
   formatDuplicateSourceLabels,
 } from "@/lib/detection";
+import llmAssistedAnnotations from "../../public/fixtures/llm-assisted-annotations.json";
 import type { AnchorRecognition, Rect } from "@/lib/types";
 
 type FixtureInput = ReturnType<typeof makeBlankImage>;
 type Structure = ReturnType<typeof detectWorksheetStructure>;
 type Annotation = { label: string; left: number; top: number; tolerance?: number };
+type ReviewedAnnotationFixture = {
+  name: string;
+  path: string;
+  problems: Array<{
+    label: string;
+    anchor: { left: number; top: number };
+    tolerance?: number;
+  }>;
+};
 
 const fixtures = {
   pershan: {
@@ -82,6 +92,16 @@ const fixtures = {
   },
 } as const;
 
+const reviewedAnnotationFixtures = (
+  llmAssistedAnnotations.fixtures as ReviewedAnnotationFixture[]
+).map((fixture) => ({
+  name: fixture.name,
+  path: fixture.path,
+  annotations: fixture.problems.map((problem) =>
+    annotation(problem.label, problem.anchor.left, problem.anchor.top, problem.tolerance),
+  ),
+}));
+
 describe("durable worksheet detection", () => {
   for (const [name, fixture] of Object.entries(fixtures)) {
     it(`preserves annotated anchors and labels for ${name}`, async () => {
@@ -119,6 +139,22 @@ describe("durable worksheet detection", () => {
         expect(currentRects.some((rect) => contains(rect, nextAnchor.left, nextAnchor.top)))
           .toBe(false);
       }
+    });
+  }
+
+  for (const fixture of reviewedAnnotationFixtures) {
+    it(`preserves reviewed offline annotations for ${fixture.name}`, async () => {
+      const input = await loadFixture(fixture.path);
+      const structure = detectWorksheetStructure(input);
+      const recognitions = recognizeAnnotations(structure, fixture.annotations);
+      const result = finalizeWorksheetDetection(structure, recognitions);
+
+      expect(result.problemDrafts.map((draft) => draft.sourceLabel)).toEqual(
+        fixture.annotations.map((item) => item.label),
+      );
+      expect(result.problemDrafts).toHaveLength(fixture.annotations.length);
+      expect(result.debug.failureReason).toBeNull();
+      expect(result.sectionHeaders).toHaveLength(0);
     });
   }
 

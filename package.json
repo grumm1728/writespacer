@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "annotate:detector:claude": "node scripts/claude-annotate-fixtures.mjs",
+    "compare:detector:annotations": "node scripts/compare-detector-annotations.mjs",
     "prepare:ocr-assets": "node scripts/copy-tesseract-assets.mjs",
     "postinstall": "npm run prepare:ocr-assets",
     "predev": "npm run prepare:ocr-assets",
@@ -11,7 +13,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test:detector": "vitest run src/lib/anchor-ocr.test.ts src/lib/detection.test.ts src/lib/layout.test.ts"
+    "test:detector": "vitest run src/lib/anchor-ocr.test.ts src/lib/detection.test.ts src/lib/layout.test.ts",
+    "test:llm-drafts": "vitest run src/lib/llm-draft-regression.test.ts",
+    "test:llm-drafts:strict": "set LLM_DRAFT_STRICT=1&& vitest run src/lib/llm-draft-regression.test.ts"
   },
   "dependencies": {
     "@tesseract.js-data/eng": "1.0.0",
