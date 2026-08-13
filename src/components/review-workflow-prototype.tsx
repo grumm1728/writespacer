@@ -27,7 +27,7 @@ const INITIAL_ITEMS: PrototypeItem[] = [
 ];
 
 const VARIANTS = [
-  { key: "A", name: "Canvas + inspector" },
+  { key: "A", name: "Quick checks" },
   { key: "B", name: "Triage queue" },
   { key: "C", name: "Focused review" },
 ] as const;
@@ -36,7 +36,7 @@ export function ReviewWorkflowPrototype() {
   const router = useRouter();
   const [variant, setVariant] = useState<"A" | "B" | "C">("A");
   const [items, setItems] = useState(INITIAL_ITEMS);
-  const [selectedId, setSelectedId] = useState(4);
+  const [selectedId, setSelectedId] = useState(2);
   const [history, setHistory] = useState<PrototypeItem[][]>([]);
   const [notice, setNotice] = useState("Detection draft ready: 2 items need review");
 
@@ -56,6 +56,14 @@ export function ReviewWorkflowPrototype() {
     );
   }
 
+  function resolveSelected(patch: Partial<PrototypeItem>, message: string) {
+    const nextQuestion = warnings.find((item) => item.id !== selectedId);
+    patchSelected({ ...patch, warning: undefined }, message);
+    if (nextQuestion) {
+      setSelectedId(nextQuestion.id);
+    }
+  }
+
   function undo() {
     const previous = history.at(-1);
     if (!previous) return;
@@ -67,7 +75,7 @@ export function ReviewWorkflowPrototype() {
   function reset() {
     setHistory((current) => [...current, items]);
     setItems(INITIAL_ITEMS);
-    setSelectedId(4);
+    setSelectedId(2);
     setNotice("Restored detector draft");
   }
 
@@ -96,7 +104,7 @@ export function ReviewWorkflowPrototype() {
     return () => window.removeEventListener("keydown", onKeyDown);
   });
 
-  const model = { items, selected, includedCount, warnings, history, notice, setSelectedId, commit, patchSelected, undo, reset };
+  const model = { items, selected, includedCount, warnings, history, notice, setNotice, setSelectedId, commit, patchSelected, resolveSelected, undo, reset };
 
   return (
     <main className="review-prototype-shell">
@@ -122,21 +130,28 @@ type Model = {
   warnings: PrototypeItem[];
   history: PrototypeItem[][];
   notice: string;
+  setNotice: (message: string) => void;
   setSelectedId: (id: number) => void;
   commit: (message: string, update: (current: PrototypeItem[]) => PrototypeItem[]) => void;
   patchSelected: (patch: Partial<PrototypeItem>, message: string) => void;
+  resolveSelected: (patch: Partial<PrototypeItem>, message: string) => void;
   undo: () => void;
   reset: () => void;
 };
 
 function VariantA({ model }: { model: Model }) {
+  const questionCount = model.warnings.length;
   return (
     <div className="prototype-frame variant-a">
-      <PrototypeHeader model={model} title="Review the detection draft" subtitle="Most pages should need zero to two quick corrections." />
-      <div className="prototype-three-pane">
-        <ItemRail model={model} />
-        <SourceCanvas model={model} />
-        <Inspector model={model} />
+      <PrototypeHeader
+        model={model}
+        title={questionCount ? `${questionCount} quick check${questionCount === 1 ? "" : "s"}` : "Ready to preview"}
+        subtitle="We only ask when the page needs your judgment."
+      />
+      <div className="prototype-three-pane quick-check-layout">
+        <QuestionQueue model={model} />
+        <SourceCanvas model={model} reviewOnly />
+        <QuickCheckPanel model={model} />
       </div>
       <PrototypeFooter model={model} />
     </div>
@@ -196,11 +211,92 @@ function ItemRail({ model }: { model: Model }) {
   return <aside className="prototype-item-rail"><div className="rail-title"><strong>Reading order</strong><button onClick={() => model.commit("Added a problem box", (items) => [...items, { id: Date.now(), label: String(items.length + 2), kind: "problem", included: true, hasDiagram: false, rect: { left: 30, top: 82, width: 38, height: 10 } }])} type="button">+ Add</button></div>{model.items.map((item, index) => <button className={item.id === model.selected.id ? "active" : ""} key={item.id} onClick={() => model.setSelectedId(item.id)} type="button"><span className="drag-grip">⠿</span><strong>{item.kind === "header" ? item.label : `Problem ${item.label}`}</strong><small>{item.included ? (item.warning ? "Review" : "Ready") : "Excluded"}</small><span>{index + 1}</span></button>)}</aside>;
 }
 
-function SourceCanvas({ model, focusOnly = false }: { model: Model; focusOnly?: boolean }) {
-  const shownItems = focusOnly ? model.items.filter((item) => item.id === model.selected.id) : model.items;
+function QuestionQueue({ model }: { model: Model }) {
+  return (
+    <aside className="quick-check-queue">
+      <div className="quick-check-heading">
+        <span className="prototype-kicker">Needs your help</span>
+        <strong>{model.warnings.length}</strong>
+      </div>
+      {model.warnings.map((item, index) => (
+        <button
+          className={item.id === model.selected.id ? "active" : ""}
+          key={item.id}
+          onClick={() => model.setSelectedId(item.id)}
+          type="button"
+        >
+          <span>{index + 1}</span>
+          <span><strong>Problem {item.label}</strong><small>{questionTopic(item)}</small></span>
+        </button>
+      ))}
+      {model.warnings.length === 0 ? <p className="checks-complete">✓ All checks cleared</p> : null}
+      <button className="advanced-review-link" onClick={() => model.setNotice("The full correction tools would open here")} type="button">
+        Something else looks wrong
+      </button>
+      <button className="start-over-link" onClick={model.reset} type="button">Start over</button>
+    </aside>
+  );
+}
+
+function SourceCanvas({ model, focusOnly = false, reviewOnly = false }: { model: Model; focusOnly?: boolean; reviewOnly?: boolean }) {
+  const shownItems = focusOnly
+    ? model.items.filter((item) => item.id === model.selected.id)
+    : reviewOnly
+      ? model.warnings
+      : model.items;
   return <section className="prototype-source"><div className="canvas-toolbar"><span>Source page</span><div><button type="button">−</button><strong>85%</strong><button type="button">+</button></div></div><div className="prototype-paper">
     {/* eslint-disable-next-line @next/next/no-img-element */}
-    <img alt="Sample algebra worksheet" src="/fixtures/pershan-problem-set-example.png" />{shownItems.map((item) => <button aria-label={`Select ${item.kind} ${item.label}`} className={`prototype-box ${item.id === model.selected.id ? "selected" : ""} ${!item.included ? "excluded" : ""} ${item.kind}`} key={item.id} onClick={() => model.setSelectedId(item.id)} style={item.rect} type="button"><span>{item.label}</span></button>)}</div><p className="canvas-hint">Drag to move · handles resize · Space + drag pans</p></section>;
+    <img alt="Sample algebra worksheet" src="/fixtures/pershan-problem-set-example.png" />{shownItems.map((item) => <button aria-label={`Select ${item.kind} ${item.label}`} className={`prototype-box ${item.id === model.selected.id ? "selected" : ""} ${!item.included ? "excluded" : ""} ${item.kind}`} key={item.id} onClick={() => model.setSelectedId(item.id)} style={item.rect} type="button"><span>{item.label}</span></button>)}</div><p className="canvas-hint">{reviewOnly ? "Zoom and pan to inspect" : "Drag to move · handles resize · Space + drag pans"}</p></section>;
+}
+
+function QuickCheckPanel({ model }: { model: Model }) {
+  if (model.warnings.length === 0) {
+    return (
+      <aside className="quick-check-panel check-done">
+        <span className="done-mark">✓</span>
+        <h2>That’s everything</h2>
+        <p>The other problems looked clear, so we left them alone.</p>
+        <button className="preview-button" type="button">Preview handout →</button>
+      </aside>
+    );
+  }
+
+  const selected = model.selected;
+  const isDiagram = selected.warning?.includes("Diagram");
+  const isSplit = selected.warning?.includes("merged");
+
+  return (
+    <aside className="quick-check-panel">
+      <span className="prototype-kicker">Problem {selected.label}</span>
+      <h2>{isDiagram ? "Does this diagram belong with problem 4?" : isSplit ? "Is this one problem or two?" : "Is this a student problem?"}</h2>
+      <p>Choose the answer that matches the source page.</p>
+      <div className="quick-answer-list">
+        {isDiagram ? (
+          <>
+            <button onClick={() => model.resolveSelected({ hasDiagram: true }, "Kept the diagram with problem 4")} type="button"><strong>Keep together</strong><span>Include the equation and diagram as one prompt</span></button>
+            <button onClick={() => model.resolveSelected({ hasDiagram: false }, "Separated the diagram from problem 4")} type="button"><strong>Separate them</strong><span>The diagram belongs somewhere else</span></button>
+          </>
+        ) : isSplit ? (
+          <>
+            <button onClick={() => model.resolveSelected({}, "Kept problem 5 together")} type="button"><strong>One problem</strong><span>Keep this as a single prompt</span></button>
+            <button onClick={() => model.resolveSelected({}, "Split problem 5 into two prompts")} type="button"><strong>Split into two</strong><span>Create two separate prompts</span></button>
+          </>
+        ) : (
+          <>
+            <button onClick={() => model.resolveSelected({ included: true }, `Kept problem ${selected.label}`)} type="button"><strong>Keep it</strong></button>
+            <button onClick={() => model.resolveSelected({ included: false }, `Removed problem ${selected.label}`)} type="button"><strong>Remove it</strong></button>
+          </>
+        )}
+      </div>
+      <button className="not-sure-button" onClick={() => model.setNotice("This check was left for later")} type="button">Not sure — skip for now</button>
+    </aside>
+  );
+}
+
+function questionTopic(item: PrototypeItem) {
+  if (item.warning?.includes("Diagram")) return "Diagram placement";
+  if (item.warning?.includes("merged")) return "Problem boundary";
+  return "Include or remove";
 }
 
 function Inspector({ model, compact = false }: { model: Model; compact?: boolean }) {
