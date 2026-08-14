@@ -266,6 +266,43 @@ describe("reviewed fixture manifest", () => {
     });
   });
 
+  it("accepts explicitly incomplete gold without inventing prompt rectangles", () => {
+    const input = validManifest();
+    input.fixtures[0].reviewedFields = [
+      "problemOrder",
+      "sourceLabels",
+      "anchorRects",
+      "expectedOutcome",
+    ];
+    input.fixtures[0].problems[0].promptRects = [];
+
+    expect(parseReviewedFixtureManifest(input)).toEqual({
+      ok: true,
+      manifest: input,
+    });
+  });
+
+  it("rejects unknown or duplicate reviewed field names", () => {
+    const input = validManifest();
+    (input.fixtures[0] as unknown as { reviewedFields: string[] }).reviewedFields = [
+      "anchorRects",
+      "anchorRects",
+      "madeUpField",
+    ];
+
+    expect(parseReviewedFixtureManifest(input)).toEqual({
+      ok: false,
+      errors: [
+        {
+          code: "invalid_reviewed_fields",
+          path: "fixtures[0].reviewedFields",
+          message:
+            "Reviewed fields must be a duplicate-free array of supported fixture field names.",
+        },
+      ],
+    });
+  });
+
   it("rejects duplicate fixture identifiers", () => {
     const input = validManifest();
     input.fixtures.push({
