@@ -14,7 +14,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test:detector": "vitest run src/lib/anchor-ocr.test.ts src/lib/detection.test.ts src/lib/layout.test.ts src/lib/reviewed-fixture-manifest.test.ts",
+    "test:detector": "vitest run src/lib/anchor-ocr.test.ts src/lib/detection.test.ts src/lib/detection/normalization.test.ts src/lib/detection/visual-evidence.test.ts src/lib/layout.test.ts src/lib/reviewed-fixture-manifest.test.ts",
     "test:llm-drafts": "vitest run src/lib/llm-draft-regression.test.ts",
     "test:llm-drafts:strict": "set LLM_DRAFT_STRICT=1&& vitest run src/lib/llm-draft-regression.test.ts"
   },
