@@ -1,15 +1,10 @@
-import type { AnchorRecognition, Rect } from "@/lib/types";
-import type {
-  WorksheetDetectionStructure,
-  finalizeWorksheetDetection,
-} from "@/lib/detection";
+import type { WorksheetAnchorProposal } from "@/lib/detection";
+import type { AnchorRecognition, DetectionOutcome, Rect } from "@/lib/types";
 import {
   REVIEWED_FIXTURE_FIELDS,
   type ReviewedFixture,
   type ReviewedFixtureField,
 } from "./reviewed-fixture-manifest.ts";
-
-type DetectionDraft = ReturnType<typeof finalizeWorksheetDetection>;
 
 export type ReviewedRecognitionResult = {
   recognitions: AnchorRecognition[];
@@ -25,10 +20,10 @@ export function missingReviewedFields(fixture: ReviewedFixture): ReviewedFixture
 }
 
 export function recognizeReviewedAnchors(
-  structure: WorksheetDetectionStructure,
+  proposals: readonly WorksheetAnchorProposal[],
   fixture: ReviewedFixture,
 ): ReviewedRecognitionResult {
-  const available = new Map(structure.proposals.map((proposal) => [proposal.id, proposal]));
+  const available = new Map(proposals.map((proposal) => [proposal.id, proposal]));
   const recognitions: AnchorRecognition[] = [];
   const failures: string[] = [];
 
@@ -69,7 +64,7 @@ export function recognizeReviewedAnchors(
 
 export function evaluateReviewedDetection(
   fixture: ReviewedFixture,
-  result: DetectionDraft,
+  result: DetectionOutcome,
 ): string[] {
   const failures: string[] = [];
   const reviewedFields = new Set(
@@ -77,19 +72,19 @@ export function evaluateReviewedDetection(
   );
 
   if (reviewedFields.has("expectedOutcome")) {
-    if (fixture.expectedOutcome === "detected" && result.debug.failureReason !== null) {
-      failures.push(`expected detected outcome; got ${result.debug.failureReason}`);
+    if (fixture.expectedOutcome === "detected" && result.failure !== null) {
+      failures.push(`expected detected outcome; got ${result.failure.reason}`);
     }
-    if (fixture.expectedOutcome === "detected" && result.debug.fallbackUsed) {
+    if (fixture.expectedOutcome === "detected" && result.diagnostics.fallbackUsed) {
       failures.push("expected detected outcome; geometric fallback was used");
     }
-    if (fixture.expectedOutcome === "fallback" && !result.debug.fallbackUsed) {
+    if (fixture.expectedOutcome === "fallback" && !result.diagnostics.fallbackUsed) {
       failures.push("expected geometric fallback; fallback was not used");
     }
     if (fixture.expectedOutcome === "blank" && result.problemDrafts.length > 0) {
       failures.push(`expected blank outcome; got ${result.problemDrafts.length} problems`);
     }
-    if (fixture.expectedOutcome === "unusable" && result.debug.failureReason === null) {
+    if (fixture.expectedOutcome === "unusable" && result.failure === null) {
       failures.push("expected unusable outcome; no failure reason was returned");
     }
   }

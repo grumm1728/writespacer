@@ -2,8 +2,7 @@ import { PDFDocument, PDFImage, PDFPage } from "pdf-lib";
 
 import { recognizeAnchorProposals } from "@/lib/anchor-ocr";
 import {
-  detectWorksheetStructure,
-  finalizeWorksheetDetection,
+  analyzeWorksheetImage,
   summarizeConfidence,
 } from "@/lib/detection";
 import type {
@@ -72,20 +71,21 @@ export async function analyzeWorksheetFile(file: File): Promise<WorksheetAnalysi
   assertUpload(file);
 
   const source = await loadWorksheetSource(file);
-  const structure = detectWorksheetStructure({
-    grayscale: source.grayscale,
-    height: source.metadata.height,
-    rgba: source.imageData.data,
-    width: source.metadata.width,
-  });
-  const recognitions = await recognizeAnchorProposals(source.canvas, structure.proposals);
-  const analysis = finalizeWorksheetDetection(structure, recognitions);
+  const analysis = await analyzeWorksheetImage(
+    {
+      grayscale: source.grayscale,
+      height: source.metadata.height,
+      rgba: source.imageData.data,
+      width: source.metadata.width,
+    },
+    async (_input, proposals) => recognizeAnchorProposals(source.canvas, proposals),
+  );
 
   return {
     sourceImage: source.metadata,
     problemDrafts: analysis.problemDrafts,
     sectionHeaders: analysis.sectionHeaders,
-    debug: analysis.debug,
+    debug: analysis.diagnostics,
     confidenceSummary: summarizeConfidence(analysis.problemDrafts),
     itemCount: analysis.problemDrafts.filter((draft) => draft.included).length,
   };
