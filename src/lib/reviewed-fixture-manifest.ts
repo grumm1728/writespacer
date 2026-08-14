@@ -8,6 +8,18 @@ export type FixtureOrientation = "portrait" | "landscape" | "square";
 
 export type FixtureExpectedOutcome = "detected" | "fallback" | "blank" | "unusable";
 
+export const REVIEWED_FIXTURE_FIELDS = [
+  "problemOrder",
+  "sourceLabels",
+  "anchorRects",
+  "promptRects",
+  "diagramAttachments",
+  "sectionHeaders",
+  "expectedOutcome",
+] as const;
+
+export type ReviewedFixtureField = (typeof REVIEWED_FIXTURE_FIELDS)[number];
+
 export type ReviewedFixtureProblem = {
   id: string;
   sourceLabel: string | null;
@@ -38,6 +50,7 @@ export type ReviewedFixture = {
     reviewer: string;
     reviewedAt: string;
   };
+  reviewedFields?: ReviewedFixtureField[];
   problems: ReviewedFixtureProblem[];
   sectionHeaders: ReviewedFixtureSectionHeader[];
   expectedOutcome: FixtureExpectedOutcome;
@@ -173,6 +186,18 @@ export function parseReviewedFixtureManifest(
       });
     }
 
+    if (
+      fixtureRecord.reviewedFields !== undefined &&
+      !isReviewedFixtureFieldArray(fixtureRecord.reviewedFields)
+    ) {
+      errors.push({
+        code: "invalid_reviewed_fields",
+        path: `fixtures[${fixtureIndex}].reviewedFields`,
+        message:
+          "Reviewed fields must be a duplicate-free array of supported fixture field names.",
+      });
+    }
+
     if (!Array.isArray(fixtureRecord.problems)) {
       errors.push({
         code: "invalid_problem_list",
@@ -264,7 +289,14 @@ export function parseReviewedFixtureManifest(
             page,
             errors,
           );
-          if (!Array.isArray(problem.promptRects) || problem.promptRects.length === 0) {
+          const promptRectsAreReviewed =
+            fixture.reviewedFields === undefined ||
+            (Array.isArray(fixture.reviewedFields) &&
+              fixture.reviewedFields.includes("promptRects"));
+          if (
+            !Array.isArray(problem.promptRects) ||
+            (promptRectsAreReviewed && problem.promptRects.length === 0)
+          ) {
             errors.push({
               code: "invalid_prompt_rects",
               path: `${problemPath}.promptRects`,
@@ -431,6 +463,18 @@ function isNonEmptyStringArray(value: unknown): value is string[] {
 
 function isIdentifierArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every(isNonEmptyString);
+}
+
+function isReviewedFixtureFieldArray(value: unknown): value is ReviewedFixtureField[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (item): item is ReviewedFixtureField =>
+        typeof item === "string" &&
+        REVIEWED_FIXTURE_FIELDS.some((field) => field === item),
+    ) &&
+    new Set(value).size === value.length
+  );
 }
 
 function collectIdentifiers(value: unknown): Set<string> {

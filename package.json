@@ -5,6 +5,7 @@
   "scripts": {
     "annotate:detector:claude": "node scripts/claude-annotate-fixtures.mjs",
     "compare:detector:annotations": "node scripts/compare-detector-annotations.mjs",
+    "report:detector-fixtures": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types scripts/report-reviewed-fixtures.ts",
     "prepare:ocr-assets": "node scripts/copy-tesseract-assets.mjs",
     "postinstall": "npm run prepare:ocr-assets",
     "predev": "npm run prepare:ocr-assets",

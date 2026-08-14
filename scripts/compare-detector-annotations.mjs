@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 
-const DEFAULT_ANNOTATIONS = "public/fixtures/llm-assisted-annotations.json";
+const DEFAULT_ANNOTATIONS = "public/fixtures/reviewed-fixture-manifest.json";
 
 async function main() {
   const annotationsPath = path.resolve(process.cwd(), process.argv[2] ?? DEFAULT_ANNOTATIONS);
@@ -14,18 +14,18 @@ async function main() {
   }
 
   const summary = fixtures.map((fixture) => ({
-    name: fixture.name,
-    path: fixture.path,
+    name: fixture.id,
+    path: fixture.sourcePath,
     problems: fixture.problems.length,
-    sectionHeaders: fixture.sectionHeaders?.length ?? 0,
-    labels: fixture.problems.map((problem) => problem.label).join(", "),
+    reviewedFields: fixture.reviewedFields?.join(", ") ?? "all",
+    labels: fixture.problems.map((problem) => problem.sourceLabel).join(", "),
   }));
 
   console.table(summary);
   console.log(
     [
-      "Use these reviewed annotations as detector-test oracle data.",
-      "Run npm.cmd run test:detector to compare detector proposals and final regions against them.",
+      "These annotations are the reviewed detector-test oracle.",
+      "Run npm.cmd run report:detector-fixtures for detector and gold-coverage results.",
       "Raw Claude drafts should stay in .worksheet-data until reviewed.",
     ].join("\n"),
   );

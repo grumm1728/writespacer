@@ -51,10 +51,11 @@ npm.cmd run dev -- --hostname 127.0.0.1 --port 3001
 ```powershell
 npm.cmd run lint
 npm.cmd run test:detector
+npm.cmd run report:detector-fixtures
 npm.cmd run build
 ```
 
-`test:detector` runs both detector fixture tests and shared layout-placement tests.
+`test:detector` runs both detector fixture tests and shared layout-placement tests. The fixture report prints a human-readable summary and writes deterministic JSON to `.worksheet-data/reviewed-fixture-report.json`.
 
 Detector research can use dev-only Claude draft annotations without changing the production app:
 
@@ -65,7 +66,7 @@ npm.cmd run compare:detector:annotations
 npm.cmd run test:llm-drafts
 ```
 
-Put `ANTHROPIC_API_KEY=...` in an uncommitted `.env` file or set it in the shell before running the non-dry-run annotation command. Only run the upload command for images that are safe to send to Anthropic. Raw Claude output is written to `.worksheet-data/llm-annotations` and should be reviewed before any annotation is committed to `public/fixtures/llm-assisted-annotations.json`.
+Put `ANTHROPIC_API_KEY=...` in an uncommitted `.env` file or set it in the shell before running the non-dry-run annotation command. Only run the upload command for images that are safe to send to Anthropic. Raw Claude output is written to `.worksheet-data/llm-annotations` and should be reviewed before any annotation is committed to `public/fixtures/reviewed-fixture-manifest.json`.
 
 ## Architecture
 
