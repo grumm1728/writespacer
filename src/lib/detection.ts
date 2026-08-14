@@ -8,65 +8,32 @@ import type {
   Rect,
   SectionHeader,
 } from "@/lib/types";
+import type { ConnectedComponent } from "@/lib/detection/connected-components";
+import {
+  asAnalysisRect,
+  normalizeWorksheetPage,
+  toAnalysisRect as sourceToAnalysisRect,
+  toSourceRect,
+  type AnalysisRect,
+  type WorksheetImageInput,
+} from "@/lib/detection/normalization";
+import {
+  extractVisualEvidence,
+  type InternalAnchorProposal,
+  type PageEvidence,
+  type RowSegment,
+  type WorksheetAnchorProposal,
+} from "@/lib/detection/visual-evidence";
 
-export type WorksheetImageInput = {
-  grayscale: Uint8Array;
-  width: number;
-  height: number;
-  rgba?: Uint8Array | Uint8ClampedArray;
-};
+export type { WorksheetImageInput } from "@/lib/detection/normalization";
+export type { WorksheetAnchorProposal } from "@/lib/detection/visual-evidence";
 
-type ConnectedComponent = Rect & {
-  id: string;
-  area: number;
-  density: number;
-  centerX: number;
-  centerY: number;
-};
-
-type TextRow = {
-  id: string;
-  rect: Rect;
-  components: ConnectedComponent[];
-  centerY: number;
-};
-
-type RowSegment = {
-  id: string;
-  rowId: string;
-  rect: Rect;
-  components: ConnectedComponent[];
-};
-
-type AnalysisRect = Rect & {
-  analysisLeft?: never;
-};
-
-export type WorksheetAnchorProposal = {
-  id: string;
-  rect: Rect;
-  rowId: string;
-  segmentId: string;
-  score: number;
-  reason: string;
-};
+const TARGET_GLYPH_HEIGHT = 18;
 
 export type AnchorRecognizer = (
   input: Readonly<WorksheetImageInput>,
   proposals: readonly WorksheetAnchorProposal[],
 ) => Promise<readonly AnchorRecognition[]>;
-
-type InternalAnchorProposal = WorksheetAnchorProposal & {
-  analysisRect: AnalysisRect;
-  contentAfter: boolean;
-  dotLike: boolean;
-};
-
-type LayoutRegion = {
-  id: string;
-  rect: Rect;
-  analysisRect: Rect;
-};
 
 type AcceptedAnchor = InternalAnchorProposal & {
   sourceLabel: string | null;
@@ -83,16 +50,6 @@ type OwnershipZone = {
   orderIndex: number;
 };
 
-type NormalizedImage = {
-  grayscale: Uint8Array;
-  rgba?: Uint8Array;
-  width: number;
-  height: number;
-  scale: number;
-  sourceWidth: number;
-  sourceHeight: number;
-};
-
 export type WorksheetDetectionStructure = {
   sourceWidth: number;
   sourceHeight: number;
@@ -101,72 +58,17 @@ export type WorksheetDetectionStructure = {
   normalizationScale: number;
   glyphHeight: number;
   contentBounds: Rect;
-  analysisContentBounds: Rect;
+  analysisContentBounds: AnalysisRect;
   rows: Array<{ id: string; rect: Rect }>;
   segments: Array<{ id: string; rowId: string; rect: Rect }>;
   layoutRegions: Array<{ id: string; rect: Rect }>;
   proposals: WorksheetAnchorProposal[];
-  internal: {
-    contentComponents: ConnectedComponent[];
-    rows: TextRow[];
-    segments: RowSegment[];
-    layoutRegions: LayoutRegion[];
-    proposals: InternalAnchorProposal[];
-  };
+  internal: PageEvidence;
 };
 
-const TARGET_GLYPH_HEIGHT = 18;
-const MAX_ANALYSIS_EDGE = 2200;
-
 export function detectWorksheetStructure(input: WorksheetImageInput): WorksheetDetectionStructure {
-  assertImageInput(input);
-
-  const normalized = normalizeImage(input);
-  const initialTextMask = buildAdaptiveMask(normalized, 13, true);
-  const contentMask = buildAdaptiveMask(normalized, 8, false);
-  const analysisContentBounds = detectContentBounds(
-    contentMask,
-    normalized.width,
-    normalized.height,
-  );
-  const contentComponents = detectConnectedComponents(
-    contentMask,
-    normalized.width,
-    normalized.height,
-    analysisContentBounds,
-    4,
-  );
-  const initialComponents = detectConnectedComponents(
-    initialTextMask,
-    normalized.width,
-    normalized.height,
-    analysisContentBounds,
-    3,
-  );
-  const glyphHeight = clamp(
-    Math.max(TARGET_GLYPH_HEIGHT, estimateNormalizedGlyphHeight(initialComponents)),
-    16,
-    26,
-  );
-  const textComponents = initialComponents.filter((component) =>
-    isTextLikeComponent(component, glyphHeight),
-  );
-  const rows = buildTextRows(textComponents, glyphHeight, normalized.width, normalized.height);
-  const segments = buildRowSegments(rows, glyphHeight, normalized.width, normalized.height);
-  const layoutRegions = detectLayoutRegions(
-    contentMask,
-    analysisContentBounds,
-    glyphHeight,
-    normalized,
-  );
-  const proposals = detectAnchorProposals(
-    rows,
-    segments,
-    contentComponents,
-    layoutRegions,
-    glyphHeight,
-    normalized,
-  );
+  const normalized = normalizeWorksheetPage(input);
+  const evidence = extractVisualEvidence(normalized);
 
   return {
     sourceWidth: normalized.sourceWidth,
@@ -174,17 +76,20 @@ export function detectWorksheetStructure(input: WorksheetImageInput): WorksheetD
     analysisWidth: normalized.width,
     analysisHeight: normalized.height,
     normalizationScale: normalized.scale,
-    glyphHeight,
-    contentBounds: fromAnalysisRect(analysisContentBounds, normalized),
-    analysisContentBounds,
-    rows: rows.map((row) => ({ id: row.id, rect: fromAnalysisRect(row.rect, normalized) })),
-    segments: segments.map((segment) => ({
+    glyphHeight: evidence.glyphHeight,
+    contentBounds: toSourceRect(evidence.contentBounds, normalized),
+    analysisContentBounds: evidence.contentBounds,
+    rows: evidence.rows.map((row) => ({
+      id: row.id,
+      rect: toSourceRect(row.rect, normalized),
+    })),
+    segments: evidence.segments.map((segment) => ({
       id: segment.id,
       rowId: segment.rowId,
-      rect: fromAnalysisRect(segment.rect, normalized),
+      rect: toSourceRect(segment.rect, normalized),
     })),
-    layoutRegions: layoutRegions.map((region) => ({ id: region.id, rect: region.rect })),
-    proposals: proposals.map((proposal) => ({
+    layoutRegions: evidence.layoutRegions.map((region) => ({ id: region.id, rect: region.rect })),
+    proposals: evidence.proposals.map((proposal) => ({
       id: proposal.id,
       rect: proposal.rect,
       rowId: proposal.rowId,
@@ -192,13 +97,7 @@ export function detectWorksheetStructure(input: WorksheetImageInput): WorksheetD
       score: proposal.score,
       reason: proposal.reason,
     })),
-    internal: {
-      contentComponents,
-      rows,
-      segments,
-      layoutRegions,
-      proposals,
-    },
+    internal: evidence,
   };
 }
 
@@ -359,766 +258,6 @@ export function summarizeConfidence(problemDrafts: ProblemDraft[]): ConfidenceSu
     averageConfidence,
     lowConfidenceCount,
   };
-}
-
-function assertImageInput({ grayscale, height, width }: WorksheetImageInput) {
-  if (width <= 0 || height <= 0 || grayscale.length !== width * height) {
-    throw new Error("Worksheet image data has invalid dimensions.");
-  }
-}
-
-function normalizeImage(input: WorksheetImageInput): NormalizedImage {
-  const estimatedGlyphHeight = estimateSourceGlyphHeight(input.grayscale, input.width, input.height);
-  const targetScale = TARGET_GLYPH_HEIGHT / Math.max(1, estimatedGlyphHeight);
-  const edgeScale = MAX_ANALYSIS_EDGE / Math.max(input.width, input.height);
-  const scale = clamp(Math.min(targetScale, edgeScale), 0.58, 3.2);
-  const width = Math.max(1, Math.round(input.width * scale));
-  const height = Math.max(1, Math.round(input.height * scale));
-
-  if (width === input.width && height === input.height) {
-    return {
-      grayscale: input.grayscale,
-      rgba: input.rgba ? new Uint8Array(input.rgba) : undefined,
-      width,
-      height,
-      scale: 1,
-      sourceWidth: input.width,
-      sourceHeight: input.height,
-    };
-  }
-
-  const grayscale = resizeGrayscale(input.grayscale, input.width, input.height, width, height);
-  const rgba = input.rgba
-    ? resizeRgba(input.rgba, input.width, input.height, width, height)
-    : undefined;
-
-  return {
-    grayscale,
-    rgba,
-    width,
-    height,
-    scale: width / input.width,
-    sourceWidth: input.width,
-    sourceHeight: input.height,
-  };
-}
-
-function estimateSourceGlyphHeight(grayscale: Uint8Array, width: number, height: number) {
-  const sampleScale = Math.min(1, 900 / Math.max(width, height));
-  const sampleWidth = Math.max(1, Math.round(width * sampleScale));
-  const sampleHeight = Math.max(1, Math.round(height * sampleScale));
-  const sample =
-    sampleScale === 1
-      ? grayscale
-      : resizeGrayscale(grayscale, width, height, sampleWidth, sampleHeight);
-  const mask = new Uint8Array(sample.length);
-
-  for (let index = 0; index < sample.length; index += 1) {
-    mask[index] = sample[index] < 190 ? 1 : 0;
-  }
-
-  const components = detectConnectedComponents(
-    mask,
-    sampleWidth,
-    sampleHeight,
-    { left: 0, top: 0, width: sampleWidth, height: sampleHeight },
-    2,
-  );
-  const heights = components
-    .filter(
-      (component) =>
-        component.height >= 3 &&
-        component.height <= Math.max(45, sampleHeight * 0.07) &&
-        component.width <= Math.max(90, component.height * 8) &&
-        component.area <= 2200 &&
-        component.density > 0.035,
-    )
-    .map((component) => component.height / sampleScale)
-    .sort((left, right) => left - right);
-
-  if (heights.length === 0) {
-    return Math.max(8, Math.min(24, height * 0.018));
-  }
-
-  const lower = Math.floor(heights.length * 0.28);
-  const upper = Math.max(lower + 1, Math.ceil(heights.length * 0.82));
-  return median(heights.slice(lower, upper));
-}
-
-function resizeGrayscale(
-  source: Uint8Array,
-  sourceWidth: number,
-  sourceHeight: number,
-  width: number,
-  height: number,
-) {
-  const output = new Uint8Array(width * height);
-  const scaleX = sourceWidth / width;
-  const scaleY = sourceHeight / height;
-
-  for (let y = 0; y < height; y += 1) {
-    const sourceY = (y + 0.5) * scaleY - 0.5;
-    const y0 = clamp(Math.floor(sourceY), 0, sourceHeight - 1);
-    const y1 = Math.min(sourceHeight - 1, y0 + 1);
-    const fy = sourceY - Math.floor(sourceY);
-
-    for (let x = 0; x < width; x += 1) {
-      const sourceX = (x + 0.5) * scaleX - 0.5;
-      const x0 = clamp(Math.floor(sourceX), 0, sourceWidth - 1);
-      const x1 = Math.min(sourceWidth - 1, x0 + 1);
-      const fx = sourceX - Math.floor(sourceX);
-      const top = source[y0 * sourceWidth + x0] * (1 - fx) + source[y0 * sourceWidth + x1] * fx;
-      const bottom =
-        source[y1 * sourceWidth + x0] * (1 - fx) + source[y1 * sourceWidth + x1] * fx;
-      output[y * width + x] = Math.round(top * (1 - fy) + bottom * fy);
-    }
-  }
-
-  return output;
-}
-
-function resizeRgba(
-  source: Uint8Array | Uint8ClampedArray,
-  sourceWidth: number,
-  sourceHeight: number,
-  width: number,
-  height: number,
-) {
-  const output = new Uint8Array(width * height * 4);
-  const scaleX = sourceWidth / width;
-  const scaleY = sourceHeight / height;
-
-  for (let y = 0; y < height; y += 1) {
-    const sourceY = Math.min(sourceHeight - 1, Math.floor(y * scaleY));
-    for (let x = 0; x < width; x += 1) {
-      const sourceX = Math.min(sourceWidth - 1, Math.floor(x * scaleX));
-      const sourceOffset = (sourceY * sourceWidth + sourceX) * 4;
-      const outputOffset = (y * width + x) * 4;
-      output[outputOffset] = source[sourceOffset];
-      output[outputOffset + 1] = source[sourceOffset + 1];
-      output[outputOffset + 2] = source[sourceOffset + 2];
-      output[outputOffset + 3] = source[sourceOffset + 3];
-    }
-  }
-
-  return output;
-}
-
-function buildAdaptiveMask(
-  image: NormalizedImage,
-  offset: number,
-  suppressColoredGuides: boolean,
-) {
-  const { grayscale, height, rgba, width } = image;
-  const integral = new Float64Array((width + 1) * (height + 1));
-
-  for (let y = 0; y < height; y += 1) {
-    let rowSum = 0;
-    for (let x = 0; x < width; x += 1) {
-      rowSum += grayscale[y * width + x];
-      integral[(y + 1) * (width + 1) + x + 1] =
-        integral[y * (width + 1) + x + 1] + rowSum;
-    }
-  }
-
-  const radius = 24;
-  const mask = new Uint8Array(width * height);
-
-  for (let y = 0; y < height; y += 1) {
-    const top = Math.max(0, y - radius);
-    const bottom = Math.min(height, y + radius + 1);
-    for (let x = 0; x < width; x += 1) {
-      const left = Math.max(0, x - radius);
-      const right = Math.min(width, x + radius + 1);
-      const area = (right - left) * (bottom - top);
-      const sum =
-        integral[bottom * (width + 1) + right] -
-        integral[top * (width + 1) + right] -
-        integral[bottom * (width + 1) + left] +
-        integral[top * (width + 1) + left];
-      const localMean = sum / Math.max(1, area);
-      const index = y * width + x;
-      const value = grayscale[index];
-
-      if (value >= Math.min(238, localMean - offset) && value >= 112) {
-        continue;
-      }
-
-      if (suppressColoredGuides && rgba) {
-        const rgbaOffset = index * 4;
-        const red = rgba[rgbaOffset];
-        const green = rgba[rgbaOffset + 1];
-        const blue = rgba[rgbaOffset + 2];
-        const maximum = Math.max(red, green, blue);
-        const minimum = Math.min(red, green, blue);
-        const saturated = maximum - minimum > 45;
-        const blueGuide = saturated && blue > red * 1.28 && blue > green * 1.08;
-        const redGuide = saturated && red > green * 1.45 && red > blue * 1.25;
-        if (blueGuide || redGuide) {
-          continue;
-        }
-      }
-
-      mask[index] = 1;
-    }
-  }
-
-  return cleanMask(mask, width, height);
-}
-
-function cleanMask(mask: Uint8Array, width: number, height: number) {
-  const bridged = new Uint8Array(mask);
-
-  for (let y = 1; y < height - 1; y += 1) {
-    for (let x = 1; x < width - 1; x += 1) {
-      const index = y * width + x;
-      if (mask[index]) {
-        continue;
-      }
-
-      if (
-        (mask[index - 1] && mask[index + 1]) ||
-        (mask[index - width] && mask[index + width])
-      ) {
-        bridged[index] = 1;
-      }
-    }
-  }
-
-  const cleaned = new Uint8Array(bridged);
-  for (let y = 1; y < height - 1; y += 1) {
-    for (let x = 1; x < width - 1; x += 1) {
-      const index = y * width + x;
-      if (!bridged[index]) {
-        continue;
-      }
-
-      let neighbors = 0;
-      for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
-        for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
-          if (offsetX === 0 && offsetY === 0) {
-            continue;
-          }
-          neighbors += bridged[(y + offsetY) * width + x + offsetX];
-        }
-      }
-      if (neighbors === 0) {
-        cleaned[index] = 0;
-      }
-    }
-  }
-
-  return cleaned;
-}
-
-function detectContentBounds(mask: Uint8Array, width: number, height: number): Rect {
-  const rows = new Array<number>(height).fill(0);
-  const columns = new Array<number>(width).fill(0);
-
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const dark = mask[y * width + x];
-      rows[y] += dark;
-      columns[x] += dark;
-    }
-  }
-
-  const minRow = Math.max(3, Math.floor(width * 0.003));
-  const minColumn = Math.max(3, Math.floor(height * 0.006));
-  const top = rows.findIndex((value) => value >= minRow);
-  const bottom = findLastIndex(rows, (value) => value >= minRow);
-  const left = columns.findIndex((value) => value >= minColumn);
-  const right = findLastIndex(columns, (value) => value >= minColumn);
-
-  if (top < 0 || left < 0 || right <= left || bottom <= top) {
-    return { left: 0, top: 0, width, height };
-  }
-
-  return padRect(
-    { left, top, width: right - left + 1, height: bottom - top + 1 },
-    width,
-    height,
-    12,
-  );
-}
-
-function detectConnectedComponents(
-  mask: Uint8Array,
-  width: number,
-  height: number,
-  bounds: Rect,
-  minArea: number,
-) {
-  const visited = new Uint8Array(width * height);
-  const components: ConnectedComponent[] = [];
-  const left = Math.max(0, Math.floor(bounds.left));
-  const right = Math.min(width, Math.ceil(bounds.left + bounds.width));
-  const top = Math.max(0, Math.floor(bounds.top));
-  const bottom = Math.min(height, Math.ceil(bounds.top + bounds.height));
-
-  for (let y = top; y < bottom; y += 1) {
-    for (let x = left; x < right; x += 1) {
-      const index = y * width + x;
-      if (!mask[index] || visited[index]) {
-        continue;
-      }
-
-      const component = floodFill(mask, visited, width, height, x, y);
-      if (component.area < minArea || component.width < 1 || component.height < 1) {
-        continue;
-      }
-
-      components.push({
-        id: `component-${components.length + 1}`,
-        ...component,
-        density: component.area / Math.max(1, component.width * component.height),
-        centerX: component.left + component.width / 2,
-        centerY: component.top + component.height / 2,
-      });
-    }
-  }
-
-  return components;
-}
-
-function estimateNormalizedGlyphHeight(components: ConnectedComponent[]) {
-  const heights = components
-    .filter(
-      (component) =>
-        component.height >= 5 &&
-        component.height <= 42 &&
-        component.width <= Math.max(80, component.height * 7) &&
-        component.area <= 2400 &&
-        component.density > 0.03,
-    )
-    .map((component) => component.height)
-    .sort((left, right) => left - right);
-
-  return heights.length > 0 ? clamp(median(heights), 10, 24) : TARGET_GLYPH_HEIGHT;
-}
-
-function isTextLikeComponent(component: ConnectedComponent, glyphHeight: number) {
-  return (
-    component.height <= glyphHeight * 3.1 &&
-    component.width <= glyphHeight * 10 &&
-    component.area <= glyphHeight * glyphHeight * 18 &&
-    component.density > 0.025
-  );
-}
-
-function buildTextRows(
-  components: ConnectedComponent[],
-  glyphHeight: number,
-  width: number,
-  height: number,
-) {
-  const sorted = [...components].sort((left, right) => {
-    if (Math.abs(left.centerY - right.centerY) <= 1) {
-      return left.left - right.left;
-    }
-    return left.centerY - right.centerY;
-  });
-  const rows: TextRow[] = [];
-
-  for (const component of sorted) {
-    const tolerance = Math.max(glyphHeight * 0.48, component.height * 0.58);
-    const candidates = rows
-      .map((row, index) => ({ index, distance: Math.abs(row.centerY - component.centerY) }))
-      .filter(({ distance }) => distance <= tolerance)
-      .sort((left, right) => left.distance - right.distance);
-    const target = candidates[0] ? rows[candidates[0].index] : null;
-
-    if (!target) {
-      rows.push({
-        id: `row-${rows.length + 1}`,
-        rect: component,
-        components: [component],
-        centerY: component.centerY,
-      });
-      continue;
-    }
-
-    target.components.push(component);
-    target.rect = unionRects([target.rect, component]);
-    target.centerY = median(target.components.map((item) => item.centerY));
-  }
-
-  return rows
-    .filter(
-      (row) =>
-        row.rect.width >= glyphHeight * 0.7 &&
-        row.rect.height < Math.max(glyphHeight * 6, height * 0.16),
-    )
-    .sort((left, right) => left.centerY - right.centerY)
-    .map((row, index) => ({
-      ...row,
-      id: `row-${index + 1}`,
-      rect: padRect(row.rect, width, height, 0),
-    }));
-}
-
-function buildRowSegments(
-  rows: TextRow[],
-  glyphHeight: number,
-  width: number,
-  height: number,
-) {
-  const segments: RowSegment[] = [];
-  const splitGap = glyphHeight * 1.45;
-
-  for (const row of rows) {
-    const sorted = [...row.components].sort((left, right) => left.left - right.left);
-    let group: ConnectedComponent[] = [];
-
-    for (const component of sorted) {
-      const previous = group.at(-1);
-      if (!previous) {
-        group = [component];
-        continue;
-      }
-
-      const gap = component.left - (previous.left + previous.width);
-      if (gap > splitGap) {
-        segments.push(makeSegment(row.id, segments.length + 1, group, width, height));
-        group = [component];
-      } else {
-        group.push(component);
-      }
-    }
-
-    if (group.length > 0) {
-      segments.push(makeSegment(row.id, segments.length + 1, group, width, height));
-    }
-  }
-
-  return segments;
-}
-
-function makeSegment(
-  rowId: string,
-  index: number,
-  components: ConnectedComponent[],
-  width: number,
-  height: number,
-): RowSegment {
-  return {
-    id: `segment-${index}`,
-    rowId,
-    rect: padRect(unionRects(components), width, height, 0),
-    components,
-  };
-}
-
-function detectLayoutRegions(
-  mask: Uint8Array,
-  contentBounds: Rect,
-  glyphHeight: number,
-  image: NormalizedImage,
-) {
-  const left = Math.max(0, Math.floor(contentBounds.left));
-  const right = Math.min(image.width, Math.ceil(contentBounds.left + contentBounds.width));
-  const top = Math.max(0, Math.floor(contentBounds.top));
-  const bottom = Math.min(image.height, Math.ceil(contentBounds.top + contentBounds.height));
-  const columns = new Array<number>(right - left).fill(0);
-
-  for (let x = left; x < right; x += 1) {
-    let ink = 0;
-    for (let y = top; y < bottom; y += 1) {
-      ink += mask[y * image.width + x];
-    }
-    columns[x - left] = ink;
-  }
-
-  const window = Math.max(3, Math.round(glyphHeight * 0.8));
-  const smoothed = movingAverage(columns, window);
-  const lowInk = Math.max(1.5, contentBounds.height * 0.0045);
-  const gutters: Array<{ start: number; end: number }> = [];
-  let gutterStart: number | null = null;
-
-  for (let index = 0; index < smoothed.length; index += 1) {
-    const insideEdge =
-      index > contentBounds.width * 0.12 && index < contentBounds.width * 0.88;
-    if (insideEdge && smoothed[index] <= lowInk) {
-      gutterStart ??= index;
-      continue;
-    }
-
-    if (gutterStart !== null) {
-      if (index - gutterStart >= glyphHeight * 1.35) {
-        gutters.push({ start: gutterStart, end: index - 1 });
-      }
-      gutterStart = null;
-    }
-  }
-
-  const usefulGutters = gutters
-    .sort((a, b) => b.end - b.start - (a.end - a.start))
-    .filter((gutter, index, all) => {
-      const center = left + (gutter.start + gutter.end) / 2;
-      return !all.slice(0, index).some((other) => {
-        const otherCenter = left + (other.start + other.end) / 2;
-        return Math.abs(center - otherCenter) < contentBounds.width * 0.16;
-      });
-    })
-    .slice(0, 2)
-    .sort((a, b) => a.start - b.start);
-
-  if (
-    usefulGutters.length === 0 &&
-    contentBounds.width / Math.max(1, contentBounds.height) > 1.2 &&
-    contentBounds.height > contentBounds.width * 0.55
-  ) {
-    const center = contentBounds.width / 2;
-    usefulGutters.push({ start: center - glyphHeight, end: center + glyphHeight });
-  }
-  const boundaries = [contentBounds.left];
-
-  for (const gutter of usefulGutters) {
-    boundaries.push(left + (gutter.start + gutter.end) / 2);
-  }
-  boundaries.push(contentBounds.left + contentBounds.width);
-
-  const regions: LayoutRegion[] = [];
-  for (let index = 0; index < boundaries.length - 1; index += 1) {
-    const regionLeft = boundaries[index];
-    const regionRight = boundaries[index + 1];
-    if (regionRight - regionLeft < glyphHeight * 8) {
-      continue;
-    }
-    const analysisRect = {
-      left: regionLeft,
-      top: contentBounds.top,
-      width: regionRight - regionLeft,
-      height: contentBounds.height,
-    };
-    regions.push({
-      id: `layout-${regions.length + 1}`,
-      analysisRect,
-      rect: fromAnalysisRect(analysisRect, image),
-    });
-  }
-
-  if (regions.length === 0) {
-    return [
-      {
-        id: "layout-1",
-        analysisRect: contentBounds,
-        rect: fromAnalysisRect(contentBounds, image),
-      },
-    ];
-  }
-
-  return regions;
-}
-
-function detectAnchorProposals(
-  rows: TextRow[],
-  segments: RowSegment[],
-  contentComponents: ConnectedComponent[],
-  layoutRegions: LayoutRegion[],
-  glyphHeight: number,
-  image: NormalizedImage,
-) {
-  const proposals: InternalAnchorProposal[] = [];
-
-  for (const segment of segments) {
-    const sorted = [...segment.components].sort((left, right) => left.left - right.left);
-    const startIndices = findPrefixStartIndices(sorted, glyphHeight);
-
-    for (const startIndex of startIndices) {
-      const candidateComponents = sorted.slice(startIndex);
-      const prefix = buildCompactPrefix(candidateComponents, glyphHeight);
-      if (!prefix) {
-        continue;
-      }
-
-      const remaining = candidateComponents.slice(prefix.consumedComponentCount);
-      const nextComponent = remaining[0] ?? null;
-      const prefixRight = prefix.rect.left + prefix.rect.width;
-      const gapAfter = nextComponent ? nextComponent.left - prefixRight : Number.POSITIVE_INFINITY;
-      const neighboringSegment = findNeighboringSegment(segment, segments, rows, glyphHeight);
-      const contentAfter = Boolean(
-        (nextComponent && gapAfter >= glyphHeight * 0.2) || neighboringSegment,
-      );
-      const diagramBelow = hasDiagramBelow(
-        prefix.rect,
-        contentComponents,
-        layoutRegions,
-        glyphHeight,
-      );
-      const compact =
-        prefix.rect.width <= glyphHeight * 3.2 &&
-        prefix.rect.height >= glyphHeight * 0.25 &&
-        prefix.rect.height <= glyphHeight * 1.75 &&
-        prefix.componentCount <= 20;
-
-      if (!compact || (!contentAfter && !diagramBelow)) {
-        continue;
-      }
-
-      const dotLike = prefix.components.some(
-        (component) =>
-          component.width <= glyphHeight * 0.38 &&
-          component.height <= glyphHeight * 0.38 &&
-          component.centerY >= prefix.rect.top + prefix.rect.height * 0.54,
-      );
-      const gapScore = Number.isFinite(gapAfter)
-        ? clamp(gapAfter / Math.max(1, glyphHeight * 1.25), 0, 1) * 0.24
-        : 0;
-      const widthScore = prefix.rect.width <= glyphHeight * 1.8 ? 0.2 : 0.12;
-      const score = clamp(
-        0.24 +
-          widthScore +
-          gapScore +
-          (contentAfter ? 0.22 : 0) +
-          (diagramBelow ? 0.18 : 0) +
-          (dotLike ? 0.08 : 0),
-        0,
-        1,
-      );
-      const analysisRect = padRect(prefix.rect, image.width, image.height, glyphHeight * 0.18);
-
-      proposals.push({
-        id: `proposal-${proposals.length + 1}`,
-        rect: fromAnalysisRect(analysisRect, image),
-        analysisRect,
-        rowId: segment.rowId,
-        segmentId: segment.id,
-        score,
-        contentAfter,
-        dotLike,
-        reason: "compact line-start mark awaiting numeric recognition",
-      });
-    }
-  }
-
-  return dedupeProposals(proposals)
-    .sort((left, right) => compareRectsByReadingOrder(left.analysisRect, right.analysisRect))
-    .map((proposal, index) => ({ ...proposal, id: `proposal-${index + 1}` }));
-}
-
-function buildCompactPrefix(components: ConnectedComponent[], glyphHeight: number) {
-  const firstIndex = components.findIndex(
-    (component) =>
-      component.height >= glyphHeight * 0.25 &&
-      component.area >= glyphHeight * 0.28,
-  );
-  if (firstIndex < 0) {
-    return null;
-  }
-  const viableComponents = components.slice(firstIndex);
-  const first = viableComponents[0];
-
-  const limit = Math.min(viableComponents.length, 24);
-  let bestEnd = 1;
-  let bestGap = -1;
-  let right = first.left + first.width;
-
-  for (let index = 1; index < limit; index += 1) {
-    const component = viableComponents[index];
-    const proposedWidth = component.left + component.width - first.left;
-    const gap = component.left - right;
-    if (proposedWidth > glyphHeight * 3.2) {
-      if (gap > bestGap) {
-        bestGap = gap;
-        bestEnd = index;
-      }
-      break;
-    }
-    if (gap > bestGap) {
-      bestGap = gap;
-      bestEnd = index;
-    }
-    right = Math.max(right, component.left + component.width);
-  }
-
-  if (bestGap < glyphHeight * 0.16) {
-    bestEnd = Math.min(limit, 2);
-  }
-  const prefix = viableComponents.slice(0, Math.max(1, bestEnd));
-
-  return {
-    rect: unionRects(prefix),
-    components: prefix,
-    componentCount: prefix.length,
-    consumedComponentCount: firstIndex + prefix.length,
-  };
-}
-
-function findPrefixStartIndices(components: ConnectedComponent[], glyphHeight: number) {
-  const indices = [0];
-  for (let index = 1; index < components.length; index += 1) {
-    const previous = components[index - 1];
-    const gap = components[index].left - (previous.left + previous.width);
-    if (gap >= glyphHeight * 0.42) {
-      indices.push(index);
-    }
-  }
-  return indices;
-}
-
-function findNeighboringSegment(
-  segment: RowSegment,
-  segments: RowSegment[],
-  rows: TextRow[],
-  glyphHeight: number,
-) {
-  const row = rows.find((candidate) => candidate.id === segment.rowId);
-  if (!row) {
-    return null;
-  }
-  const right = segment.rect.left + segment.rect.width;
-  return (
-    segments
-      .filter((candidate) => candidate.rowId === segment.rowId && candidate.rect.left > right)
-      .sort((left, rightCandidate) => left.rect.left - rightCandidate.rect.left)
-      .find((candidate) => candidate.rect.left - right <= glyphHeight * 8) ?? null
-  );
-}
-
-function hasDiagramBelow(
-  rect: Rect,
-  components: ConnectedComponent[],
-  layoutRegions: LayoutRegion[],
-  glyphHeight: number,
-) {
-  const region = layoutRegions.find((candidate) =>
-    rectContains(candidate.analysisRect, rect.left + rect.width / 2, rect.top + rect.height / 2),
-  );
-  const right = region
-    ? region.analysisRect.left + region.analysisRect.width
-    : rect.left + glyphHeight * 18;
-
-  return components.some(
-    (component) =>
-      component.top > rect.top &&
-      component.top - rect.top < glyphHeight * 18 &&
-      component.centerX >= rect.left - glyphHeight * 2 &&
-      component.centerX <= right &&
-      component.width > glyphHeight * 4 &&
-      component.height > glyphHeight * 2.5 &&
-      component.area > glyphHeight * glyphHeight * 1.4,
-  );
-}
-
-function dedupeProposals(proposals: InternalAnchorProposal[]) {
-  const sorted = [...proposals].sort((left, right) => right.score - left.score);
-  const kept: InternalAnchorProposal[] = [];
-
-  for (const proposal of sorted) {
-    if (
-      kept.some(
-        (candidate) =>
-          candidate.rowId === proposal.rowId &&
-          intersects(padRect(candidate.analysisRect, Infinity, Infinity, 4), proposal.analysisRect),
-      )
-    ) {
-      continue;
-    }
-    kept.push(proposal);
-  }
-
-  return kept;
 }
 
 function selectRecognizedAnchors(
@@ -2644,116 +1783,13 @@ function normalizeSourceLabel(value: string) {
 
 function fromAnalysisRect(
   rect: Rect,
-  image: Pick<NormalizedImage, "scale" | "sourceHeight" | "sourceWidth"> | WorksheetDetectionStructure,
+  structure: WorksheetDetectionStructure,
 ) {
-  const scale = "scale" in image ? image.scale : image.normalizationScale;
-  const sourceWidth = image.sourceWidth;
-  const sourceHeight = image.sourceHeight;
-  return padRect(
-    {
-      left: rect.left / scale,
-      top: rect.top / scale,
-      width: rect.width / scale,
-      height: rect.height / scale,
-    },
-    sourceWidth,
-    sourceHeight,
-    0,
-  );
+  return toSourceRect(asAnalysisRect(rect), structure.internal.page);
 }
 
 function toAnalysisRect(rect: Rect, structure: WorksheetDetectionStructure) {
-  return {
-    left: rect.left * structure.normalizationScale,
-    top: rect.top * structure.normalizationScale,
-    width: rect.width * structure.normalizationScale,
-    height: rect.height * structure.normalizationScale,
-  };
-}
-
-function movingAverage(values: number[], radius: number) {
-  const output = new Array<number>(values.length).fill(0);
-  let sum = 0;
-  let left = 0;
-  let right = 0;
-
-  while (right < values.length && right <= radius) {
-    sum += values[right];
-    right += 1;
-  }
-
-  for (let index = 0; index < values.length; index += 1) {
-    output[index] = sum / Math.max(1, right - left);
-    const nextLeft = index - radius;
-    if (nextLeft >= 0) {
-      sum -= values[nextLeft];
-      left = nextLeft + 1;
-    }
-    const nextRight = index + radius + 1;
-    if (nextRight < values.length) {
-      sum += values[nextRight];
-      right = nextRight + 1;
-    }
-  }
-
-  return output;
-}
-
-function floodFill(
-  mask: Uint8Array,
-  visited: Uint8Array,
-  width: number,
-  height: number,
-  startX: number,
-  startY: number,
-) {
-  const queueX = [startX];
-  const queueY = [startY];
-  visited[startY * width + startX] = 1;
-  let cursor = 0;
-  let left = startX;
-  let right = startX;
-  let top = startY;
-  let bottom = startY;
-  let area = 0;
-
-  while (cursor < queueX.length) {
-    const x = queueX[cursor];
-    const y = queueY[cursor];
-    cursor += 1;
-    area += 1;
-    left = Math.min(left, x);
-    right = Math.max(right, x);
-    top = Math.min(top, y);
-    bottom = Math.max(bottom, y);
-
-    const neighbors: Array<[number, number]> = [
-      [x - 1, y],
-      [x + 1, y],
-      [x, y - 1],
-      [x, y + 1],
-    ];
-    for (const [nextX, nextY] of neighbors) {
-      if (nextX < 0 || nextX >= width || nextY < 0 || nextY >= height) {
-        continue;
-      }
-      const offset = nextY * width + nextX;
-      if (!mask[offset] || visited[offset]) {
-        continue;
-      }
-      visited[offset] = 1;
-      queueX.push(nextX);
-      queueY.push(nextY);
-    }
-  }
-
-  return {
-    left,
-    top,
-    width: right - left + 1,
-    height: bottom - top + 1,
-    area,
-  };
+  return sourceToAnalysisRect(rect, structure.internal.page);
 }
 
 function padRect(rect: Rect, maxWidth: number, maxHeight: number, padding: number): Rect {
@@ -2876,13 +1912,4 @@ function median(values: number[]) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
-}
-
-function findLastIndex<T>(values: T[], predicate: (value: T) => boolean) {
-  for (let index = values.length - 1; index >= 0; index -= 1) {
-    if (predicate(values[index])) {
-      return index;
-    }
-  }
-  return -1;
 }
