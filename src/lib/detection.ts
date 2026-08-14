@@ -2,13 +2,14 @@ import type {
   AnchorRecognition,
   ConfidenceSummary,
   DetectionDebugSnapshot,
+  DetectionOutcome,
   InputProblemFragment,
   ProblemDraft,
   Rect,
   SectionHeader,
 } from "@/lib/types";
 
-type AnalyzeImageInput = {
+export type WorksheetImageInput = {
   grayscale: Uint8Array;
   width: number;
   height: number;
@@ -49,6 +50,11 @@ export type WorksheetAnchorProposal = {
   score: number;
   reason: string;
 };
+
+export type AnchorRecognizer = (
+  input: Readonly<WorksheetImageInput>,
+  proposals: readonly WorksheetAnchorProposal[],
+) => Promise<readonly AnchorRecognition[]>;
 
 type InternalAnchorProposal = WorksheetAnchorProposal & {
   analysisRect: AnalysisRect;
@@ -112,7 +118,7 @@ export type WorksheetDetectionStructure = {
 const TARGET_GLYPH_HEIGHT = 18;
 const MAX_ANALYSIS_EDGE = 2200;
 
-export function detectWorksheetStructure(input: AnalyzeImageInput): WorksheetDetectionStructure {
+export function detectWorksheetStructure(input: WorksheetImageInput): WorksheetDetectionStructure {
   assertImageInput(input);
 
   const normalized = normalizeImage(input);
@@ -309,10 +315,26 @@ export function finalizeWorksheetDetection(
   };
 }
 
-export function analyzeWorksheetImage(input: AnalyzeImageInput) {
+export async function analyzeWorksheetImage(
+  input: WorksheetImageInput,
+  recognizeAnchors: AnchorRecognizer,
+): Promise<DetectionOutcome> {
   const structure = detectWorksheetStructure(input);
-  const recognitions = inferDeterministicRecognitions(structure);
-  return finalizeWorksheetDetection(structure, recognitions);
+  const recognitions = await recognizeAnchors(input, structure.proposals);
+  const detection = finalizeWorksheetDetection(structure, [...recognitions]);
+  const failure = detection.debug.failureReason
+    ? {
+        reason: detection.debug.failureReason,
+        recoverable: true as const,
+      }
+    : null;
+
+  return {
+    problemDrafts: detection.problemDrafts,
+    sectionHeaders: detection.sectionHeaders,
+    failure,
+    diagnostics: detection.debug,
+  };
 }
 
 export function formatDuplicateSourceLabels(labels: Array<string | null>) {
@@ -339,13 +361,13 @@ export function summarizeConfidence(problemDrafts: ProblemDraft[]): ConfidenceSu
   };
 }
 
-function assertImageInput({ grayscale, height, width }: AnalyzeImageInput) {
+function assertImageInput({ grayscale, height, width }: WorksheetImageInput) {
   if (width <= 0 || height <= 0 || grayscale.length !== width * height) {
     throw new Error("Worksheet image data has invalid dimensions.");
   }
 }
 
-function normalizeImage(input: AnalyzeImageInput): NormalizedImage {
+function normalizeImage(input: WorksheetImageInput): NormalizedImage {
   const estimatedGlyphHeight = estimateSourceGlyphHeight(input.grayscale, input.width, input.height);
   const targetScale = TARGET_GLYPH_HEIGHT / Math.max(1, estimatedGlyphHeight);
   const edgeScale = MAX_ANALYSIS_EDGE / Math.max(input.width, input.height);
@@ -2561,26 +2583,6 @@ function buildFallbackBlockDrafts(structure: WorksheetDetectionStructure) {
         included: true,
       } satisfies ProblemDraft;
     });
-}
-
-function inferDeterministicRecognitions(structure: WorksheetDetectionStructure) {
-  const anchors = selectGeometricAnchors(structure);
-  if (anchors.length === 0) {
-    return [];
-  }
-
-  const first = anchors[0];
-  const firstComponent = structure.internal.proposals.find((proposal) => proposal.id === first.id);
-  const startsAtOne = firstComponent
-    ? firstComponent.analysisRect.width / Math.max(1, firstComponent.analysisRect.height) < 0.62
-    : true;
-  const start = startsAtOne ? 1 : 3;
-
-  return anchors.map((anchor, index) => ({
-    proposalId: anchor.id,
-    sourceLabel: String(start + index),
-    confidence: 0.52,
-  }));
 }
 
 function buildTrackDebugRects(

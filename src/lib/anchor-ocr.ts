@@ -13,7 +13,7 @@ let workerPromise: Promise<Worker> | null = null;
 
 export async function recognizeAnchorProposals(
   sourceCanvas: HTMLCanvasElement,
-  proposals: WorksheetAnchorProposal[],
+  proposals: readonly WorksheetAnchorProposal[],
 ): Promise<AnchorRecognition[]> {
   if (proposals.length === 0) {
     return [];

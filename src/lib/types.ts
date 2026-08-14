@@ -168,6 +168,18 @@ export type DetectionDebugSnapshot = {
   failureReason: string | null;
 };
 
+export type DetectionFailure = {
+  reason: string;
+  recoverable: true;
+};
+
+export type DetectionOutcome = {
+  problemDrafts: ProblemDraft[];
+  sectionHeaders: SectionHeader[];
+  failure: DetectionFailure | null;
+  diagnostics: DetectionDebugSnapshot;
+};
+
 export type WorksheetAnalysis = {
   sourceImage: SourceImageMetadata;
   problemDrafts: ProblemDraft[];

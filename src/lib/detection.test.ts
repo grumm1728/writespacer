@@ -5,6 +5,7 @@ import sharp from "sharp";
 import { describe, expect, it } from "vitest";
 
 import {
+  analyzeWorksheetImage,
   detectWorksheetStructure,
   finalizeWorksheetDetection,
   formatDuplicateSourceLabels,
@@ -38,7 +39,7 @@ function fixture(id: string): ReviewedFixture {
 }
 
 function recognizeFixture(structure: Structure, reviewedFixture: ReviewedFixture) {
-  const observation = recognizeReviewedAnchors(structure, reviewedFixture);
+  const observation = recognizeReviewedAnchors(structure.proposals, reviewedFixture);
   expect(observation.failures).toEqual([]);
   return observation.recognitions;
 }
@@ -48,14 +49,30 @@ describe("durable worksheet detection", () => {
     it(`preserves reviewed anchors and labels for ${reviewedFixture.id}`, async () => {
       const input = await loadFixture(reviewedFixture.sourcePath);
       const structure = detectWorksheetStructure(input);
-      const observation = recognizeReviewedAnchors(structure, reviewedFixture);
+      const observation = recognizeReviewedAnchors(structure.proposals, reviewedFixture);
       expect(observation.failures).toEqual([]);
-      const result = finalizeWorksheetDetection(structure, observation.recognitions);
+      const compatibilityResult = finalizeWorksheetDetection(
+        structure,
+        observation.recognitions,
+      );
+      let facadeRecognitionFailures: string[] = [];
+      const result = await analyzeWorksheetImage(input, async (_source, proposals) => {
+        const facadeObservation = recognizeReviewedAnchors(proposals, reviewedFixture);
+        facadeRecognitionFailures = facadeObservation.failures;
+        return facadeObservation.recognitions;
+      });
 
+      expect(facadeRecognitionFailures).toEqual([]);
       expect(evaluateReviewedDetection(reviewedFixture, result)).toEqual([]);
-      expect(result.debug.stageCounts.acceptedAnchors).toBe(reviewedFixture.problems.length);
-      expect(result.debug.normalizationScale).toBeGreaterThan(0);
-      expect(result.debug.layoutTracks.length).toBeGreaterThan(0);
+      expect(result.problemDrafts).toEqual(compatibilityResult.problemDrafts);
+      expect(result.sectionHeaders).toEqual(compatibilityResult.sectionHeaders);
+      expect(result.diagnostics).toEqual(compatibilityResult.debug);
+      expect(result.failure).toBeNull();
+      expect(result.diagnostics.stageCounts.acceptedAnchors).toBe(
+        reviewedFixture.problems.length,
+      );
+      expect(result.diagnostics.normalizationScale).toBeGreaterThan(0);
+      expect(result.diagnostics.layoutTracks.length).toBeGreaterThan(0);
 
       for (let index = 0; index < result.problemDrafts.length - 1; index += 1) {
         const currentAnchor = center(result.problemDrafts[index].anchorRect);
@@ -193,13 +210,20 @@ describe("durable worksheet detection", () => {
     }
   });
 
-  it("returns a reviewable empty state for blank input", () => {
-    const structure = detectWorksheetStructure(makeBlankImage(800, 1000));
-    const result = finalizeWorksheetDetection(structure, []);
+  it("returns a recoverable failure and diagnostics for blank input", async () => {
+    const result = await analyzeWorksheetImage(
+      makeBlankImage(800, 1000),
+      async () => [],
+    );
 
     expect(result.problemDrafts).toHaveLength(0);
-    expect(result.debug.failureReason).toContain("No worksheet content");
-    expect(result.debug.rows).toEqual([]);
+    expect(result.failure).toEqual({
+      reason:
+        "No worksheet content could be separated into problem regions. Draw regions manually.",
+      recoverable: true,
+    });
+    expect(result.diagnostics.failureReason).toBe(result.failure?.reason);
+    expect(result.diagnostics.rows).toEqual([]);
   });
 });
 

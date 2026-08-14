@@ -5,10 +5,7 @@ import process from "node:process";
 
 import sharp from "sharp";
 
-import {
-  detectWorksheetStructure,
-  finalizeWorksheetDetection,
-} from "../src/lib/detection.ts";
+import { analyzeWorksheetImage } from "../src/lib/detection.ts";
 import {
   evaluateReviewedDetection,
   missingReviewedFields,
@@ -45,11 +42,14 @@ async function main(): Promise<void> {
       );
     }
 
-    const structure = detectWorksheetStructure(input);
-    const observation = recognizeReviewedAnchors(structure, fixture);
-    const result = finalizeWorksheetDetection(structure, observation.recognitions);
+    let recognitionFailures: string[] = [];
+    const result = await analyzeWorksheetImage(input, async (_source, proposals) => {
+      const observation = recognizeReviewedAnchors(proposals, fixture);
+      recognitionFailures = observation.failures;
+      return observation.recognitions;
+    });
     const detectorFailures = [
-      ...observation.failures,
+      ...recognitionFailures,
       ...evaluateReviewedDetection(fixture, result),
     ];
     const incompleteGoldFields = missingReviewedFields(fixture);
