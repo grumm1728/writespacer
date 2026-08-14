@@ -94,3 +94,17 @@ The committed regression expectations are:
 - Blank input: a reviewable debug state rather than an unhandled crash.
 
 When changing the frontend, verify the flow manually in the browser with the built-in sample page: load the sample, analyze it, inspect the review boxes, adjust output settings, and confirm the PDF preview updates without layout overflow.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked in GitHub Issues for `grumm1728/writespacer`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the default five-role triage vocabulary. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repository. See `docs/agents/domain.md`.
