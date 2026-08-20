@@ -244,6 +244,9 @@ async function observeAnchorLabels(
   try {
     return await recognizeAnchors(input, proposals);
   } catch {
+    // OCR is an observation, not a prerequisite. A failed local recognizer
+    // must still allow the deterministic geometric fallback to produce a
+    // reviewable draft.
     return [];
   }
 }

@@ -37,6 +37,11 @@ export async function recognizeAnchorProposals(
   }
 }
 
+/**
+ * The production recognizer adapter. The detector owns the recognition seam;
+ * client code only supplies the browser-local source canvas that Tesseract
+ * needs to build its contact sheet.
+ */
 export function createLocalAnchorRecognizer(
   sourceCanvas: HTMLCanvasElement,
 ): AnchorRecognizer {
