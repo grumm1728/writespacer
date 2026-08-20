@@ -1,6 +1,6 @@
 import { PDFDocument, PDFImage, PDFPage } from "pdf-lib";
 
-import { recognizeAnchorProposals } from "@/lib/anchor-ocr";
+import { createLocalAnchorRecognizer } from "@/lib/anchor-ocr";
 import {
   analyzeWorksheetImage,
   summarizeConfidence,
@@ -8,15 +8,11 @@ import {
 import type {
   CompositionMode,
   InputProblemRegion,
-  LayoutDensity,
-  LayoutMode,
-  PromptScale,
   ProblemDraft,
   Rect,
   SourceImageMetadata,
   WorksheetAnalysis,
   WorksheetItem,
-  WorksheetLayoutOptions,
   WorksheetPagePlacement,
   WorksheetPreviewPage,
   WorksheetLayoutPreview,
@@ -26,10 +22,7 @@ import type {
 const MAX_UPLOAD_BYTES = 12 * 1024 * 1024;
 const ACCEPTED_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 
-export const DEFAULT_LAYOUT_OPTIONS: WorksheetLayoutOptions = {
-  density: "compact",
-  promptScale: "small",
-};
+export const MAX_PROBLEM_SELECTION = 8;
 
 type WorksheetSource = {
   canvas: HTMLCanvasElement;
@@ -65,8 +58,6 @@ type SectionHeaderAsset = SectionHeaderMetric & {
   bytes: Uint8Array;
 };
 
-type Placement = ReturnType<typeof measureItem>;
-
 export async function analyzeWorksheetFile(file: File): Promise<WorksheetAnalysis> {
   assertUpload(file);
 
@@ -78,7 +69,7 @@ export async function analyzeWorksheetFile(file: File): Promise<WorksheetAnalysi
       rgba: source.imageData.data,
       width: source.metadata.width,
     },
-    async (_input, proposals) => recognizeAnchorProposals(source.canvas, proposals),
+    createLocalAnchorRecognizer(source.canvas),
   );
 
   return {
@@ -94,19 +85,18 @@ export async function analyzeWorksheetFile(file: File): Promise<WorksheetAnalysi
 export async function generateWorksheetPdf(
   file: File,
   reviewedProblems: ProblemDraft[],
-  layoutOptions: WorksheetLayoutOptions = DEFAULT_LAYOUT_OPTIONS,
 ): Promise<WorksheetResult> {
   assertUpload(file);
 
   const source = await loadWorksheetSource(file);
-  const problemRegions = toProblemRegions(reviewedProblems.filter((draft) => draft.included));
+  const problemRegions = toProblemRegions(selectProblemCandidates(reviewedProblems));
 
   if (problemRegions.length === 0) {
     throw new Error("Include at least one problem region before generating the PDF.");
   }
 
   const crops = await buildCropAssets(source.canvas, problemRegions);
-  const pdf = await buildWorksheetPdf(crops, layoutOptions);
+  const pdf = await buildWorksheetPdf(crops);
   const pdfBytes = new Uint8Array(pdf.bytes.byteLength);
   pdfBytes.set(pdf.bytes);
 
@@ -118,24 +108,20 @@ export async function generateWorksheetPdf(
     confidenceSummary: summarizeConfidence(problemRegions),
     pageCount: pdf.pageCount,
     itemCount: problemRegions.length,
-    layoutOptions,
     pdfUrl: URL.createObjectURL(new Blob([pdfBytes], { type: "application/pdf" })),
   };
 }
 
-export function previewWorksheetLayout(
-  reviewedProblems: ProblemDraft[],
-  layoutOptions: WorksheetLayoutOptions = DEFAULT_LAYOUT_OPTIONS,
-): WorksheetLayoutPreview {
-  const metrics = toProblemRegions(reviewedProblems.filter((draft) => draft.included)).map(
+export function previewWorksheetLayout(reviewedProblems: ProblemDraft[]): WorksheetLayoutPreview {
+  const metrics = toProblemRegions(selectProblemCandidates(reviewedProblems)).map(
     measureProblemCrop,
   );
-  return measureWorksheetLayout(metrics, layoutOptions);
+  return measureWorksheetLayout(metrics);
 }
 
 export async function processWorksheetFile(file: File): Promise<WorksheetResult> {
   const analysis = await analyzeWorksheetFile(file);
-  return generateWorksheetPdf(file, analysis.problemDrafts, DEFAULT_LAYOUT_OPTIONS);
+  return generateWorksheetPdf(file, analysis.problemDrafts);
 }
 
 export function revokeWorksheetResult(result: WorksheetResult) {
@@ -146,6 +132,17 @@ export const __testing = {
   getPromptSourceRects,
   measureProblemCrop,
 };
+
+export function selectProblemCandidates(drafts: readonly ProblemDraft[]): ProblemDraft[] {
+  return drafts
+    .filter(isUsableSelectedProblem)
+    .sort((left, right) => left.orderIndex - right.orderIndex)
+    .slice(0, MAX_PROBLEM_SELECTION);
+}
+
+function isUsableSelectedProblem(draft: ProblemDraft) {
+  return draft.included && draft.unionBounds.width > 0 && draft.unionBounds.height > 0;
+}
 
 function assertUpload(file: File) {
   if (!ACCEPTED_MIME_TYPES.has(file.type)) {
@@ -394,9 +391,9 @@ function getPromptSourceRects(
   return [unionRects([region.anchorRect, firstContent]), ...region.contentRects.slice(1)];
 }
 
-async function buildWorksheetPdf(crops: CropAsset[], layoutOptions: WorksheetLayoutOptions) {
+async function buildWorksheetPdf(crops: CropAsset[]) {
   const pdf = await PDFDocument.create();
-  const layout = measureWorksheetLayout(crops, layoutOptions);
+  const layout = measureWorksheetLayout(crops);
   const pageWidth = 612;
   const pageHeight = 792;
   const margin = 36;
@@ -434,343 +431,130 @@ async function buildWorksheetPdf(crops: CropAsset[], layoutOptions: WorksheetLay
 
   return {
     bytes: await pdf.save(),
-    pageCount: Math.max(1, layout.pageCount),
+    pageCount: 1,
     items: layout.worksheetItems,
     margin,
   };
 }
 
-function measureWorksheetLayout(
-  crops: CropMetric[],
-  layoutOptions: WorksheetLayoutOptions,
-): WorksheetLayoutPreview {
+function measureWorksheetLayout(crops: CropMetric[]): WorksheetLayoutPreview {
   const pageWidth = 612;
   const pageHeight = 792;
   const margin = 36;
-  const gutter = layoutOptions.density === "compact" ? 14 : 18;
-  const rowGap = densityValue(layoutOptions.density, {
-    compact: 12,
-    balanced: 18,
-    spacious: 24,
-  });
-  const contentWidth = pageWidth - margin * 2;
-  const threeColumnWidth = (contentWidth - gutter * 2) / 3;
-  const twoColumnWidth = (contentWidth - gutter) / 2;
-  const rows = buildLayoutRows(crops, layoutOptions.density);
+  const selection = crops.slice(0, MAX_PROBLEM_SELECTION);
   const items: WorksheetItem[] = [];
   const pages = [createPreviewPage(0, pageWidth, pageHeight)];
+  const arrangement = getHandoutArrangement(selection.length, pageWidth, pageHeight, margin);
+  const renderedHeaderRects = new Set<string>();
 
-  let pageIndex = 0;
-  let cursorTop = margin;
-
-  for (const row of rows) {
-    const placements = row.map((crop, index) => {
-      const slotWidth =
-        row.length === 3 ? threeColumnWidth : row.length === 2 ? twoColumnWidth : contentWidth;
-      const layoutMode = chooseLayoutMode(crop, slotWidth, layoutOptions.density);
-      const placement = measureItem(
-        layoutMode,
-        crop.width,
-        crop.height,
-        slotWidth,
-        crop.classification,
-        layoutOptions.density,
-        layoutOptions.promptScale,
-      );
-      return {
-        crop,
-        columnSpan: row.length === 3 ? (1 as const) : row.length === 2 ? (2 as const) : (3 as const),
-        placement,
-        x:
-          row.length === 3
-            ? margin + index * (threeColumnWidth + gutter)
-            : row.length === 2
-              ? margin + index * (twoColumnWidth + gutter)
-              : margin,
-      };
+  selection.forEach((crop, index) => {
+    const slot = arrangement.slots[index];
+    if (!slot) return;
+    const itemId = `item-${index + 1}`;
+    const { problem, headers } = measureHandoutSlot(itemId, crop, slot, renderedHeaderRects);
+    pages[0].placements.push(...headers, problem);
+    items.push({
+      id: itemId,
+      regionId: crop.regionId,
+      pageIndex: 0,
+      layoutMode: "below",
+      compositionMode: crop.compositionMode,
+      problemNumber: crop.problemNumber,
+      sourceLabel: crop.sourceLabel,
+      columnSpan: arrangement.columns === 1 ? 3 : 2,
+      promptSize: { width: Math.round(problem.prompt.width), height: Math.round(problem.prompt.height) },
+      answerArea: { width: Math.round(problem.answerArea.width), height: Math.round(problem.answerArea.height) },
     });
-    const headerPlacements = measureRowSectionHeaders(
-      row,
-      contentWidth,
-      margin,
-      layoutOptions.promptScale,
-    );
-
-    const rowHeight = Math.max(...placements.map((item) => item.placement.blockHeight));
-    const headerHeight = headerPlacements.reduce((sum, header) => sum + header.rect.height, 0);
-    const headerGap = headerPlacements.length > 0 ? 8 : 0;
-    const headerInternalGap = Math.max(0, headerPlacements.length - 1) * 6;
-    const blockHeight = headerHeight + headerInternalGap + headerGap + rowHeight;
-
-    if (cursorTop + blockHeight > pageHeight - margin) {
-      pageIndex += 1;
-      pages.push(createPreviewPage(pageIndex, pageWidth, pageHeight));
-      cursorTop = margin;
-    }
-
-    for (const header of headerPlacements) {
-      const placement: WorksheetPagePlacement = {
-        ...header,
-        pageIndex,
-        rect: { ...header.rect, top: cursorTop },
-      };
-      pages[pageIndex].placements.push(placement);
-      cursorTop += placement.rect.height + 6;
-    }
-
-    if (headerPlacements.length > 0) {
-      cursorTop += 2;
-    }
-
-    for (const placementInfo of placements) {
-      const itemId = `item-${items.length + 1}`;
-      const problemPlacement = makeProblemPlacement(
-        itemId,
-        placementInfo.crop,
-        pageIndex,
-        placementInfo.x,
-        cursorTop,
-        placementInfo.placement,
-      );
-      pages[pageIndex].placements.push(problemPlacement);
-      items.push({
-        id: itemId,
-        regionId: placementInfo.crop.regionId,
-        pageIndex,
-        layoutMode: placementInfo.placement.layoutMode,
-        compositionMode: placementInfo.crop.compositionMode,
-        problemNumber: placementInfo.crop.problemNumber,
-        sourceLabel: placementInfo.crop.sourceLabel,
-        columnSpan: placementInfo.columnSpan,
-        promptSize: {
-          width: Math.round(problemPlacement.prompt.width),
-          height: Math.round(problemPlacement.prompt.height),
-        },
-        answerArea: {
-          width: Math.round(problemPlacement.answerArea.width),
-          height: Math.round(problemPlacement.answerArea.height),
-        },
-      });
-    }
-
-    cursorTop += rowHeight + rowGap;
-  }
-
-  return {
-    pageCount: Math.max(1, pageIndex + 1),
-    worksheetItems: items,
-    pages,
-  };
-}
-
-type MeasuredSectionHeaderPlacement = Omit<
-  Extract<WorksheetPagePlacement, { type: "section-header" }>,
-  "pageIndex"
->;
-
-function createPreviewPage(pageIndex: number, width: number, height: number): WorksheetPreviewPage {
-  return {
-    pageIndex,
-    width,
-    height,
-    placements: [],
-  };
-}
-
-function measureRowSectionHeaders(
-  row: CropMetric[],
-  contentWidth: number,
-  margin: number,
-  promptScale: PromptScale,
-): MeasuredSectionHeaderPlacement[] {
-  const seen = new Set<string>();
-  const headers: MeasuredSectionHeaderPlacement[] = [];
-
-  for (const crop of row) {
-    for (const header of crop.sectionHeaders) {
-      const dedupeKey = rectKey(header.sourceRect);
-      if (seen.has(dedupeKey)) {
-        continue;
-      }
-      seen.add(dedupeKey);
-
-      const scale = Math.min(promptScaleValue(promptScale), contentWidth / header.width);
-      headers.push({
-        id: header.id,
-        type: "section-header",
-        regionId: crop.regionId,
-        sourceRect: header.sourceRect,
-        rect: {
-          left: margin,
-          top: 0,
-          width: header.width * scale,
-          height: header.height * scale,
-        },
-      });
-    }
-  }
-
-  return headers;
-}
-
-function makeProblemPlacement(
-  itemId: string,
-  crop: CropMetric,
-  pageIndex: number,
-  x: number,
-  top: number,
-  placement: Placement,
-): Extract<WorksheetPagePlacement, { type: "problem" }> {
-  const prompt = {
-    left: x,
-    top,
-    width: placement.prompt.width,
-    height: placement.prompt.height,
-  };
-  const answerArea = placement.stack
-    ? {
-        left: x,
-        top: top + placement.prompt.height + placement.gap,
-        width: placement.answer.width,
-        height: placement.answer.height,
-      }
-    : {
-        left: x + placement.prompt.width + placement.gap,
-        top,
-        width: placement.answer.width,
-        height: placement.answer.height,
-      };
-
-  return {
-    id: itemId,
-    type: "problem",
-    regionId: crop.regionId,
-    pageIndex,
-    sourceLabel: crop.sourceLabel,
-    rect: unionRects([prompt, answerArea]),
-    prompt,
-    answerArea,
-  };
-}
-
-function buildLayoutRows(crops: CropMetric[], density: LayoutDensity) {
-  const rows: CropMetric[][] = [];
-  let index = 0;
-
-  while (index < crops.length) {
-    const current = crops[index];
-    if (current.classification === "complex") {
-      rows.push([current]);
-      index += 1;
-      continue;
-    }
-
-    const maxRowItems =
-      density === "compact" && current.classification === "simple"
-        ? 3
-        : density === "spacious" || current.classification === "standard"
-          ? 1
-          : 2;
-    const row = [current];
-    let lookahead = index + 1;
-
-    while (
-      row.length < maxRowItems &&
-      lookahead < crops.length &&
-      crops[lookahead].classification !== "complex" &&
-      (density === "compact" || crops[lookahead].classification === current.classification)
-    ) {
-      row.push(crops[lookahead]);
-      lookahead += 1;
-    }
-
-    rows.push(row);
-    index += row.length;
-  }
-
-  return rows;
-}
-
-function chooseLayoutMode(crop: CropMetric, slotWidth: number, density: LayoutDensity): LayoutMode {
-  if (
-    crop.classification === "complex" ||
-    crop.height > densityValue(density, { compact: 180, balanced: 170, spacious: 150 }) ||
-    crop.width > slotWidth * densityValue(density, { compact: 0.9, balanced: 0.84, spacious: 0.74 })
-  ) {
-    return "below";
-  }
-
-  return "side";
-}
-
-function measureItem(
-  layoutMode: LayoutMode,
-  width: number,
-  height: number,
-  slotWidth: number,
-  classification: "simple" | "standard" | "complex",
-  density: LayoutDensity,
-  promptScale: PromptScale,
-) {
-  const targetPromptScale = promptScaleValue(promptScale);
-  const densityScale = densityValue(density, {
-    compact: 0.74,
-    balanced: 1,
-    spacious: 1.28,
   });
 
-  if (layoutMode === "side") {
-    const scaledPrompt = Math.min(targetPromptScale, (slotWidth * 0.56) / width, 116 / height);
-    const promptWidth = width * scaledPrompt;
-    const promptHeight = height * scaledPrompt;
-    const gap = 12;
-    const answerWidth = Math.max(88, slotWidth - promptWidth - gap);
-    const answerHeight =
-      Math.max(classification === "simple" ? 78 : 104, promptHeight + 6) * densityScale;
+  return { pageCount: 1, worksheetItems: items, pages };
+}
 
-    return {
-      layoutMode,
-      blockHeight: Math.max(promptHeight, answerHeight),
-      prompt: { width: promptWidth, height: promptHeight },
-      answer: { width: answerWidth, height: answerHeight },
-      gap,
-      stack: false,
-    };
+function createPreviewPage(pageIndex: number, width: number, height: number): WorksheetPreviewPage {
+  return { pageIndex, width, height, placements: [] };
+}
+
+type HandoutSlot = Rect;
+
+function getHandoutArrangement(count: number, pageWidth: number, pageHeight: number, margin: number) {
+  const columns = count <= 2 ? 1 : 2;
+  const rows = count <= 2 ? Math.max(1, count) : Math.ceil(count / 2);
+  const gutter = 18;
+  const contentWidth = pageWidth - margin * 2;
+  const contentHeight = pageHeight - margin * 2;
+  const slotWidth = (contentWidth - gutter * (columns - 1)) / columns;
+  const slotHeight = (contentHeight - gutter * (rows - 1)) / rows;
+  const slots: HandoutSlot[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const column = index % columns;
+    const row = Math.floor(index / columns);
+    slots.push({
+      left: margin + column * (slotWidth + gutter),
+      top: margin + row * (slotHeight + gutter),
+      width: slotWidth,
+      height: slotHeight,
+    });
   }
+  return { columns, slots };
+}
 
-  const scaledPrompt = Math.min(
-    targetPromptScale,
-    slotWidth / width,
-    densityValue(density, { compact: 154, balanced: 176, spacious: 190 }) / height,
-  );
-  const promptWidth = width * scaledPrompt;
-  const promptHeight = height * scaledPrompt;
-  const gap = 10;
-  const answerHeight =
-    classification === "complex"
-      ? Math.max(104, Math.min(210, promptHeight * 0.72)) * densityScale
-      : Math.max(104, Math.min(176, promptHeight * 0.78)) * densityScale;
-
+function measureHandoutSlot(
+  itemId: string,
+  crop: CropMetric,
+  slot: HandoutSlot,
+  renderedHeaderRects: Set<string>,
+): {
+  problem: Extract<WorksheetPagePlacement, { type: "problem" }>;
+  headers: Extract<WorksheetPagePlacement, { type: "section-header" }>[];
+} {
+  const headers: Extract<WorksheetPagePlacement, { type: "section-header" }>[] = [];
+  let cursorTop = slot.top;
+  for (const header of crop.sectionHeaders) {
+    const key = rectKey(header.sourceRect);
+    if (renderedHeaderRects.has(key)) {
+      continue;
+    }
+    renderedHeaderRects.add(key);
+    const headerBudget = (slot.height * 0.2) / Math.max(1, crop.sectionHeaders.length);
+    const scale = Math.min(0.46, slot.width / header.width, headerBudget / header.height);
+    const height = Math.max(1, header.height * scale);
+    headers.push({
+      id: header.id,
+      type: "section-header",
+      regionId: crop.regionId,
+      pageIndex: 0,
+      sourceRect: header.sourceRect,
+      rect: { left: slot.left, top: cursorTop, width: header.width * scale, height },
+    });
+    cursorTop += height + 6;
+  }
+  const availableHeight = Math.max(1, slot.top + slot.height - cursorTop);
+  const promptScale = Math.min(0.52, slot.width / crop.width, (availableHeight * 0.42) / crop.height);
+  const prompt = { left: slot.left, top: cursorTop, width: crop.width * promptScale, height: crop.height * promptScale };
+  const answerTop = prompt.top + prompt.height + 10;
+  const answerArea = {
+    left: slot.left,
+    top: answerTop,
+    width: slot.width,
+    height: Math.max(1, slot.top + slot.height - answerTop),
+  };
   return {
-    layoutMode,
-    blockHeight: promptHeight + gap + answerHeight,
-    prompt: { width: promptWidth, height: promptHeight },
-    answer: { width: slotWidth, height: answerHeight },
-    gap,
-    stack: true,
+    headers,
+    problem: {
+      id: itemId,
+      type: "problem",
+      regionId: crop.regionId,
+      pageIndex: 0,
+      sourceLabel: crop.sourceLabel,
+      rect: unionRects([prompt, answerArea]),
+      prompt,
+      answerArea,
+    },
   };
 }
 
-function promptScaleValue(promptScale: PromptScale) {
-  return ({
-    small: 0.42,
-    medium: 0.54,
-    large: 0.66,
-  } satisfies Record<PromptScale, number>)[promptScale];
-}
-
-function densityValue<T>(density: LayoutDensity, values: Record<LayoutDensity, T>) {
-  return values[density];
+function rectKey(rect: Rect) {
+  return [rect.left, rect.top, rect.width, rect.height].map(Math.round).join(":");
 }
 
 function drawImageRect(page: PDFPage, image: PDFImage, rect: Rect, pageHeight: number) {
@@ -795,15 +579,6 @@ function unionRects(rects: Rect[]) {
     width: right - left,
     height: bottom - top,
   };
-}
-
-function rectKey(rect: Rect) {
-  return [
-    Math.round(rect.left),
-    Math.round(rect.top),
-    Math.round(rect.width),
-    Math.round(rect.height),
-  ].join(":");
 }
 
 function canvasToBlob(canvas: HTMLCanvasElement) {
