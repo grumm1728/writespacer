@@ -9,7 +9,6 @@ import { analyzeWorksheetImage } from "../src/lib/detection.ts";
 import {
   createReviewedAnchorRecognizer,
   evaluateReviewedDetection,
-  createReviewedAnchorRecognizer,
   missingReviewedFields,
 } from "../src/lib/reviewed-fixture-evaluation.ts";
 import { parseReviewedFixtureManifest } from "../src/lib/reviewed-fixture-manifest.ts";
