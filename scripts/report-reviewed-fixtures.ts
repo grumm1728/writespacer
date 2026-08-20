@@ -8,8 +8,8 @@ import sharp from "sharp";
 import { analyzeWorksheetImage } from "../src/lib/detection.ts";
 import {
   evaluateReviewedDetection,
+  createReviewedAnchorRecognizer,
   missingReviewedFields,
-  recognizeReviewedAnchors,
 } from "../src/lib/reviewed-fixture-evaluation.ts";
 import { parseReviewedFixtureManifest } from "../src/lib/reviewed-fixture-manifest.ts";
 
@@ -43,11 +43,12 @@ async function main(): Promise<void> {
     }
 
     let recognitionFailures: string[] = [];
-    const result = await analyzeWorksheetImage(input, async (_source, proposals) => {
-      const observation = recognizeReviewedAnchors(proposals, fixture);
-      recognitionFailures = observation.failures;
-      return observation.recognitions;
-    });
+    const result = await analyzeWorksheetImage(
+      input,
+      createReviewedAnchorRecognizer(fixture, (observation) => {
+        recognitionFailures = observation.failures;
+      }),
+    );
     const detectorFailures = [
       ...recognitionFailures,
       ...evaluateReviewedDetection(fixture, result),

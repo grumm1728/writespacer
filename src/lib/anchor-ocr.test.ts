@@ -14,7 +14,7 @@ vi.mock("tesseract.js", () => ({
 }));
 
 import {
-  recognizeAnchorProposals,
+  createLocalAnchorRecognizer,
   terminateAnchorOcrWorker,
 } from "@/lib/anchor-ocr";
 import type { WorksheetAnchorProposal } from "@/lib/detection";
@@ -49,9 +49,15 @@ describe("anchor OCR adapter", () => {
     });
     const source = makeCanvas(400, 300) as unknown as HTMLCanvasElement;
     const proposals = [proposal("a", 10), proposal("b", 60)];
+    const recognizeLocally = createLocalAnchorRecognizer(source);
+    const input = {
+      grayscale: new Uint8Array(400 * 300).fill(255),
+      height: 300,
+      width: 400,
+    };
 
-    await recognizeAnchorProposals(source, proposals);
-    await recognizeAnchorProposals(source, proposals);
+    await recognizeLocally(input, proposals);
+    await recognizeLocally(input, proposals);
 
     expect(tesseract.createWorker).toHaveBeenCalledTimes(1);
     expect(tesseract.setParameters).toHaveBeenCalledTimes(1);
