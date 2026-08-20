@@ -1,6 +1,6 @@
 import { createWorker, OEM, PSM, type Worker } from "tesseract.js";
 
-import type { WorksheetAnchorProposal } from "@/lib/detection";
+import type { AnchorRecognizer, WorksheetAnchorProposal } from "@/lib/detection";
 import type { AnchorRecognition, Rect } from "@/lib/types";
 
 const CONTACT_COLUMNS = 3;
@@ -35,6 +35,12 @@ export async function recognizeAnchorProposals(
   } catch {
     return [];
   }
+}
+
+export function createLocalAnchorRecognizer(
+  sourceCanvas: HTMLCanvasElement,
+): AnchorRecognizer {
+  return async (_input, proposals) => recognizeAnchorProposals(sourceCanvas, proposals);
 }
 
 export async function terminateAnchorOcrWorker() {

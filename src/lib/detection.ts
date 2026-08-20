@@ -219,7 +219,7 @@ export async function analyzeWorksheetImage(
   recognizeAnchors: AnchorRecognizer,
 ): Promise<DetectionOutcome> {
   const structure = detectWorksheetStructure(input);
-  const recognitions = await recognizeAnchors(input, structure.proposals);
+  const recognitions = await observeAnchorLabels(input, structure.proposals, recognizeAnchors);
   const detection = finalizeWorksheetDetection(structure, [...recognitions]);
   const failure = detection.debug.failureReason
     ? {
@@ -234,6 +234,18 @@ export async function analyzeWorksheetImage(
     failure,
     diagnostics: detection.debug,
   };
+}
+
+async function observeAnchorLabels(
+  input: WorksheetImageInput,
+  proposals: readonly WorksheetAnchorProposal[],
+  recognizeAnchors: AnchorRecognizer,
+): Promise<readonly AnchorRecognition[]> {
+  try {
+    return await recognizeAnchors(input, proposals);
+  } catch {
+    return [];
+  }
 }
 
 export function formatDuplicateSourceLabels(labels: Array<string | null>) {

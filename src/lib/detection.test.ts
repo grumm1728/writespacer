@@ -11,6 +11,7 @@ import {
   formatDuplicateSourceLabels,
 } from "@/lib/detection";
 import {
+  createReviewedAnchorRecognizer,
   evaluateReviewedDetection,
   recognizeReviewedAnchors,
 } from "@/lib/reviewed-fixture-evaluation";
@@ -55,12 +56,12 @@ describe("durable worksheet detection", () => {
         structure,
         observation.recognitions,
       );
-      let facadeRecognitionFailures: string[] = [];
-      const result = await analyzeWorksheetImage(input, async (_source, proposals) => {
-        const facadeObservation = recognizeReviewedAnchors(proposals, reviewedFixture);
-        facadeRecognitionFailures = facadeObservation.failures;
-        return facadeObservation.recognitions;
-      });
+      const facadeRecognition = createReviewedAnchorRecognizer(reviewedFixture);
+      const facadeRecognitionFailures = recognizeReviewedAnchors(
+        structure.proposals,
+        reviewedFixture,
+      ).failures;
+      const result = await analyzeWorksheetImage(input, facadeRecognition);
 
       expect(facadeRecognitionFailures).toEqual([]);
       expect(evaluateReviewedDetection(reviewedFixture, result)).toEqual([]);
@@ -224,6 +225,17 @@ describe("durable worksheet detection", () => {
     });
     expect(result.diagnostics.failureReason).toBe(result.failure?.reason);
     expect(result.diagnostics.rows).toEqual([]);
+  });
+
+  it("falls back when the injected recognizer fails", async () => {
+    const input = await loadFixture(fixture("original").sourcePath);
+    const result = await analyzeWorksheetImage(input, async () => {
+      throw new Error("local OCR worker was unavailable");
+    });
+
+    expect(result.problemDrafts.length).toBeGreaterThan(0);
+    expect(result.diagnostics.fallbackUsed).toBe(true);
+    expect(result.failure).toBeNull();
   });
 });
 

@@ -1,6 +1,6 @@
 import { PDFDocument, PDFImage, PDFPage } from "pdf-lib";
 
-import { recognizeAnchorProposals } from "@/lib/anchor-ocr";
+import { createLocalAnchorRecognizer } from "@/lib/anchor-ocr";
 import {
   analyzeWorksheetImage,
   summarizeConfidence,
@@ -78,7 +78,7 @@ export async function analyzeWorksheetFile(file: File): Promise<WorksheetAnalysi
       rgba: source.imageData.data,
       width: source.metadata.width,
     },
-    async (_input, proposals) => recognizeAnchorProposals(source.canvas, proposals),
+    createLocalAnchorRecognizer(source.canvas),
   );
 
   return {

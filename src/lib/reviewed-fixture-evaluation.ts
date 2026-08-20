@@ -1,4 +1,4 @@
-import type { WorksheetAnchorProposal } from "@/lib/detection";
+import type { AnchorRecognizer, WorksheetAnchorProposal } from "@/lib/detection";
 import type { AnchorRecognition, DetectionOutcome, Rect } from "@/lib/types";
 import {
   REVIEWED_FIXTURE_FIELDS,
@@ -60,6 +60,17 @@ export function recognizeReviewedAnchors(
   }
 
   return { recognitions, failures };
+}
+
+export function createReviewedAnchorRecognizer(
+  fixture: ReviewedFixture,
+  onObservation?: (observation: ReviewedRecognitionResult) => void,
+): AnchorRecognizer {
+  return async (_input, proposals) => {
+    const observation = recognizeReviewedAnchors(proposals, fixture);
+    onObservation?.(observation);
+    return observation.recognitions;
+  };
 }
 
 export function evaluateReviewedDetection(
