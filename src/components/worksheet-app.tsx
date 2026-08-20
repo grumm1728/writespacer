@@ -5,14 +5,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { formatDuplicateSourceLabels } from "@/lib/detection";
 import {
   analyzeWorksheetFile,
-  DEFAULT_LAYOUT_OPTIONS,
   generateWorksheetPdf,
+  MAX_PROBLEM_SELECTION,
   previewWorksheetLayout,
   revokeWorksheetResult,
 } from "@/lib/client-processing";
 import type {
-  LayoutDensity,
-  PromptScale,
   ProblemDraft,
   Rect,
   WorksheetAnalysis,
@@ -90,10 +88,6 @@ export function WorksheetApp() {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [showSampleModal, setShowSampleModal] = useState(false);
   const [selectedDraftId, setSelectedDraftId] = useState<string | null>(null);
-  const [density, setDensity] = useState<LayoutDensity>(DEFAULT_LAYOUT_OPTIONS.density);
-  const [promptScale, setPromptScale] = useState<PromptScale>(
-    DEFAULT_LAYOUT_OPTIONS.promptScale,
-  );
   const [editMode, setEditMode] = useState<"select" | "draw">("select");
   const [interaction, setInteraction] = useState<InteractionState | null>(null);
   const [drawPreview, setDrawPreview] = useState<Rect | null>(null);
@@ -120,8 +114,8 @@ export function WorksheetApp() {
     [drafts],
   );
   const layoutPreview = useMemo(
-    () => previewWorksheetLayout(drafts, { density, promptScale }),
-    [density, drafts, promptScale],
+    () => previewWorksheetLayout(drafts),
+    [drafts],
   );
   const canGenerate = Boolean(file) && includedDrafts.length > 0;
 
@@ -151,8 +145,6 @@ export function WorksheetApp() {
     replacePreview(nextPreviewUrl);
     setError(null);
     setEditMode("select");
-    setDensity(DEFAULT_LAYOUT_OPTIONS.density);
-    setPromptScale(DEFAULT_LAYOUT_OPTIONS.promptScale);
     setStatus("idle");
   }
 
@@ -169,8 +161,9 @@ export function WorksheetApp() {
     try {
       const nextAnalysis = await analyzeWorksheetFile(file);
       setAnalysis(nextAnalysis);
-      setDrafts(nextAnalysis.problemDrafts);
-      setSelectedDraftId(nextAnalysis.problemDrafts[0]?.id ?? null);
+      const initialDrafts = selectFirstEightCandidates(nextAnalysis.problemDrafts);
+      setDrafts(initialDrafts);
+      setSelectedDraftId(initialDrafts[0]?.id ?? null);
       setStatus("reviewing");
       setError(nextAnalysis.debug.failureReason);
     } catch (processingError) {
@@ -199,7 +192,7 @@ export function WorksheetApp() {
     setError(null);
 
     try {
-      const nextResult = await generateWorksheetPdf(file, drafts, { density, promptScale });
+      const nextResult = await generateWorksheetPdf(file, drafts);
       setResult(nextResult);
       setStatus("complete");
     } catch (processingError) {
@@ -249,11 +242,20 @@ export function WorksheetApp() {
 
   function toggleIncluded(draftId: string) {
     clearCurrentResult();
-    setDrafts((current) =>
-      current.map((draft) =>
+    setDrafts((current) => {
+      const target = current.find((draft) => draft.id === draftId);
+      if (!target) {
+        return current;
+      }
+      if (!target.included && current.filter((draft) => draft.included).length >= MAX_PROBLEM_SELECTION) {
+        setError(`Choose no more than ${MAX_PROBLEM_SELECTION} problems for one handout.`);
+        return current;
+      }
+      setError(null);
+      return current.map((draft) =>
         draft.id === draftId ? { ...draft, included: !draft.included } : draft,
-      ),
-    );
+      );
+    });
   }
 
   function updateDraftLabel(draftId: string, nextLabel: string) {
@@ -366,7 +368,11 @@ export function WorksheetApp() {
 
     if (interaction.type === "draw" && drawPreview && drawPreview.width > 18 && drawPreview.height > 18) {
       clearCurrentResult();
-      const manualDraft = makeManualDraft(drawPreview, drafts.length);
+      const manualDraft = makeManualDraft(
+        drawPreview,
+        drafts.length,
+        includedDrafts.length < MAX_PROBLEM_SELECTION,
+      );
       setDrafts((current) => reindexDrafts([...current, manualDraft]));
       setSelectedDraftId(manualDraft.id);
       setEditMode("select");
@@ -410,7 +416,7 @@ export function WorksheetApp() {
             <div className={`workflow-step ${result ? "complete" : analysis ? "active" : ""}`}>
               <span>3</span>
               <strong>Handout</strong>
-              <small>{result ? "Ready" : `${layoutPreview.pageCount} pages`}</small>
+              <small>{result ? "Ready" : "One page"}</small>
             </div>
           </div>
         </header>
@@ -632,7 +638,7 @@ export function WorksheetApp() {
             <div className="output-title">
               <h3>Handout</h3>
               <span className="meta-text">
-                {result ? "PDF ready" : `${layoutPreview.pageCount} page preview`}
+                {result ? "PDF ready" : "One-page preview"}
               </span>
             </div>
             <div className="handout-actions">
@@ -651,48 +657,18 @@ export function WorksheetApp() {
                 </button>
               )}
             </div>
-            <div className="density-control" role="group" aria-label="Worksheet density">
-              {(["compact", "balanced", "spacious"] as const).map((option) => (
-                <button
-                  key={option}
-                  className={density === option ? "active" : ""}
-                  onClick={() => {
-                    clearCurrentResult();
-                    setDensity(option);
-                  }}
-                  type="button"
-                >
-                  {option}
-                </button>
-              ))}
-            </div>
-            <div className="density-control" role="group" aria-label="Prompt size">
-              {(["small", "medium", "large"] as const).map((option) => (
-                <button
-                  key={option}
-                  className={promptScale === option ? "active" : ""}
-                  onClick={() => {
-                    clearCurrentResult();
-                    setPromptScale(option);
-                  }}
-                  type="button"
-                >
-                  {option === "medium" ? "Med" : option}
-                </button>
-              ))}
-            </div>
             <div className="status-grid compact">
               <div className="item-card">
-                <h4>Detected prompts</h4>
-                <p>{drafts.length > 0 ? includedDrafts.length : "0"}</p>
+                <h4>Selected problems</h4>
+                <p>{drafts.length > 0 ? includedDrafts.length : "0"} / {MAX_PROBLEM_SELECTION}</p>
               </div>
               <div className="item-card">
-                <h4>PDF pages</h4>
+                <h4>Handout sides</h4>
                 <p>{result ? result.pageCount : layoutPreview.pageCount}</p>
               </div>
               <div className="item-card">
-                <h4>Spacing</h4>
-                <p>{density}</p>
+                <h4>Arrangement</h4>
+                <p>Fixed</p>
               </div>
             </div>
             {previewUrl && analysis ? (
@@ -1066,7 +1042,7 @@ function makeEditedDraft(draft: ProblemDraft, bounds: Rect, orderIndex: number):
   };
 }
 
-function makeManualDraft(bounds: Rect, orderIndex: number): ProblemDraft {
+function makeManualDraft(bounds: Rect, orderIndex: number, included: boolean): ProblemDraft {
   const id = `manual-${Date.now()}`;
   return {
     id,
@@ -1092,7 +1068,7 @@ function makeManualDraft(bounds: Rect, orderIndex: number): ProblemDraft {
     ],
     compositionMode: "union-fallback",
     columnHint: 0,
-    included: true,
+    included,
   };
 }
 
@@ -1134,6 +1110,18 @@ function padBounds(rect: Rect, analysis: WorksheetAnalysis | null) {
 
 function reindexDrafts(drafts: ProblemDraft[]) {
   return drafts.map((draft, index) => ({ ...draft, orderIndex: index }));
+}
+
+function selectFirstEightCandidates(drafts: ProblemDraft[]) {
+  let selected = 0;
+  return drafts.map((draft) => {
+    const usable = draft.unionBounds.width > 0 && draft.unionBounds.height > 0;
+    const included = draft.included && usable && selected < MAX_PROBLEM_SELECTION;
+    if (included) {
+      selected += 1;
+    }
+    return { ...draft, included };
+  });
 }
 
 function unionRects(rects: Rect[]) {

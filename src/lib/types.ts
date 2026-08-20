@@ -10,15 +10,6 @@ export type WorksheetStatus =
 
 export type CompositionMode = "composite-stack" | "union-fallback";
 
-export type LayoutDensity = "compact" | "balanced" | "spacious";
-
-export type PromptScale = "small" | "medium" | "large";
-
-export type WorksheetLayoutOptions = {
-  density: LayoutDensity;
-  promptScale: PromptScale;
-};
-
 export type Rect = {
   left: number;
   top: number;
@@ -203,6 +194,5 @@ export type WorksheetResult = {
   confidenceSummary: ConfidenceSummary;
   pageCount: number;
   itemCount: number;
-  layoutOptions: WorksheetLayoutOptions;
   pdfUrl: string;
 };
