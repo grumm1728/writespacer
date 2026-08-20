@@ -11,6 +11,7 @@ import {
   formatDuplicateSourceLabels,
 } from "@/lib/detection";
 import {
+  createReviewedAnchorRecognizer,
   evaluateReviewedDetection,
   createReviewedAnchorRecognizer,
   recognizeReviewedAnchors,

@@ -7,6 +7,7 @@ import sharp from "sharp";
 
 import { analyzeWorksheetImage } from "../src/lib/detection.ts";
 import {
+  createReviewedAnchorRecognizer,
   evaluateReviewedDetection,
   createReviewedAnchorRecognizer,
   missingReviewedFields,
